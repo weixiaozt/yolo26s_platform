@@ -1,0 +1,98 @@
+version: "3.8"
+
+services:
+  # ---- MySQL 数据库 ----
+  mysql:
+    image: mysql:8.0
+    container_name: yolo_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: yolo26seg
+      MYSQL_DATABASE: yolo_seg
+      MYSQL_CHARSET: utf8mb4
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      retries: 5
+
+  # ---- Redis 消息队列 ----
+  redis:
+    image: redis:7-alpine
+    container_name: yolo_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  # ---- FastAPI 后端 ----
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: yolo_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: mysql+pymysql://root:yolo26seg@mysql:3306/yolo_seg?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_ROOT: /app/storage
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      DEBUG: "False"
+      CORS_ORIGINS: '["http://localhost","http://localhost:80","http://localhost:5173"]'
+      JWT_SECRET: yolo26s_seg_docker_secret_key
+    ports:
+      - "8000:8000"
+    volumes:
+      - storage_data:/app/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---- Celery Worker（训练任务）----
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: yolo_celery
+    restart: unless-stopped
+    command: celery -A server.tasks worker --loglevel=info --pool=solo
+    environment:
+      DATABASE_URL: mysql+pymysql://root:yolo26seg@mysql:3306/yolo_seg?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_ROOT: /app/storage
+      PYTHONPATH: /app
+    volumes:
+      - storage_data:/app/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---- Nginx 前端 ----
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: yolo_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+    driver: local
+  storage_data:
+    driver: local

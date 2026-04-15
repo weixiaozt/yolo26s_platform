@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+.git
+.vscode
+node_modules
+web/node_modules
+web/dist
+*.zip
+venv
+.env
+storage/runs/*
+storage/uploads/*
+storage/datasets/*
+storage/exports/*
+!storage/**/.gitkeep

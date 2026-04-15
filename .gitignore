@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+web/dist/
+
+# 环境配置
+.env
+
+# 数据文件（太大不上传）
+storage/uploads/*
+storage/datasets/*
+storage/runs/*
+storage/exports/*
+!storage/**/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 备份
+backups/

@@ -1,0 +1,36 @@
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# 系统依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3-pip python3.11-venv \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf python3.11 /usr/bin/python3 \
+    && ln -sf python3 /usr/bin/python
+
+# Python 依赖
+COPY server/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# GPU 版 PyTorch
+RUN pip install --no-cache-dir \
+    torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# 推断/导出依赖
+RUN pip install --no-cache-dir \
+    openvino onnx onnxslim onnxruntime \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 复制代码
+COPY core/ /app/core/
+COPY server/ /app/server/
+COPY storage/ /app/storage/
+
+ENV PYTHONPATH=/app
+ENV STORAGE_ROOT=/app/storage
+
+EXPOSE 8000
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]

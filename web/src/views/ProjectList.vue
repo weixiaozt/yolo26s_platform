@@ -1,0 +1,277 @@
+<template>
+  <div class="page-container">
+    <!-- 页头 -->
+    <div class="page-header">
+      <h1>项目管理</h1>
+      <div style="display:flex;gap:10px">
+        <el-button type="primary" @click="showCreateDialog = true">
+          <el-icon><Plus /></el-icon>
+          新建项目
+        </el-button>
+        <el-button @click="router.push('/import')">
+          <el-icon><Upload /></el-icon>
+          导入项目
+        </el-button>
+      </div>
+    </div>
+
+    <!-- 项目卡片列表 -->
+    <div v-if="projects.length > 0" class="project-grid">
+      <el-card
+        v-for="p in projects"
+        :key="p.id"
+        class="project-card"
+        shadow="hover"
+        @click="router.push(`/project/${p.id}`)"
+      >
+        <template #header>
+          <div class="card-header">
+            <span class="project-name">{{ p.name }}</span>
+            <el-tag :type="p.status === 'active' ? 'success' : 'info'" size="small">
+              {{ p.status === 'active' ? '活跃' : '归档' }}
+            </el-tag>
+          </div>
+        </template>
+        <p class="project-desc">{{ p.description || '暂无描述' }}</p>
+        <div class="project-meta">
+          <span>
+            <el-icon><Picture /></el-icon>
+            {{ p.resize_h }}×{{ p.resize_w }} → {{ p.crop_size }}
+          </span>
+          <span>
+            <el-icon><Collection /></el-icon>
+            {{ p.defect_classes.length }} 个类别
+          </span>
+        </div>
+        <div class="project-classes">
+          <el-tag
+            v-for="dc in p.defect_classes"
+            :key="dc.class_index"
+            :color="dc.color"
+            effect="dark"
+            size="small"
+            style="margin-right: 4px; margin-bottom: 4px; border: none;"
+          >
+            {{ dc.name }}
+          </el-tag>
+        </div>
+        <div class="project-time">
+          创建于 {{ formatDate(p.created_at) }}
+          <el-button
+            type="danger" text size="small"
+            style="float: right"
+            @click.stop="handleDeleteProject(p.id, p.name)"
+          >
+            删除项目
+          </el-button>
+        </div>
+      </el-card>
+    </div>
+
+    <!-- 空状态 -->
+    <el-empty v-else description="还没有项目，点击上方按钮创建" />
+
+    <!-- 新建项目对话框 -->
+    <el-dialog v-model="showCreateDialog" title="新建项目" width="560px" @close="resetForm">
+      <el-form :model="form" label-width="100px" label-position="left">
+        <el-form-item label="项目名称" required>
+          <el-input v-model="form.name" placeholder="如：硅片裂纹检测-批次A" />
+        </el-form-item>
+        <el-form-item label="项目描述">
+          <el-input v-model="form.description" type="textarea" :rows="2" />
+        </el-form-item>
+
+        <el-divider content-position="left">预处理参数</el-divider>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Resize 高度">
+              <el-input-number v-model="form.resize_h" :min="640" :max="8192" :step="64" style="width:100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Resize 宽度">
+              <el-input-number v-model="form.resize_w" :min="640" :max="8192" :step="64" style="width:100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="切割尺寸">
+              <el-input-number v-model="form.crop_size" :min="320" :max="8192" :step="32" style="width:100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="重叠率">
+              <el-input-number v-model="form.overlap" :min="0" :max="0.5" :step="0.05" :precision="2" style="width:100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-divider content-position="left">缺陷类别</el-divider>
+        <div v-for="(cls, idx) in form.class_names" :key="idx" class="class-row">
+          <el-input v-model="cls.name" placeholder="类别名" style="width: 160px" />
+          <el-color-picker v-model="cls.color" size="small" />
+          <el-button
+            v-if="form.class_names.length > 1"
+            type="danger" text size="small"
+            @click="form.class_names.splice(idx, 1)"
+          >
+            删除
+          </el-button>
+        </div>
+        <el-button type="primary" text @click="addClass" style="margin-top: 8px">
+          + 添加类别
+        </el-button>
+      </el-form>
+
+      <template #footer>
+        <el-button @click="showCreateDialog = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="handleCreate">创建</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { projectApi, type Project, type ProjectCreate, type DefectClass } from '../api/project'
+
+const router = useRouter()
+const projects = ref<Project[]>([])
+const showCreateDialog = ref(false)
+const creating = ref(false)
+
+const defaultColors = ['#FF4444', '#44BB44', '#4488FF', '#FFAA00', '#FF44FF', '#44FFFF']
+
+const form = ref<ProjectCreate>({
+  name: '',
+  description: '',
+  resize_h: 4096,
+  resize_w: 4096,
+  crop_size: 640,
+  overlap: 0.2,
+  class_names: [
+    { class_index: 0, name: 'defect_1', color: '#FF4444' },
+    { class_index: 1, name: 'defect_2', color: '#44BB44' },
+    { class_index: 2, name: 'defect_3', color: '#4488FF' },
+  ],
+})
+
+function addClass() {
+  const idx = form.value.class_names!.length
+  form.value.class_names!.push({
+    class_index: idx,
+    name: `defect_${idx + 1}`,
+    color: defaultColors[idx % defaultColors.length],
+  })
+}
+
+function resetForm() {
+  form.value = {
+    name: '', description: '',
+    resize_h: 4096, resize_w: 4096, crop_size: 640, overlap: 0.2,
+    class_names: [
+      { class_index: 0, name: 'defect_1', color: '#FF4444' },
+      { class_index: 1, name: 'defect_2', color: '#44BB44' },
+      { class_index: 2, name: 'defect_3', color: '#4488FF' },
+    ],
+  }
+}
+
+async function handleDeleteProject(id: number, name: string) {
+  try {
+    await ElMessageBox.confirm(`确定删除项目「${name}」？所有图像和标注将被永久删除。`, '删除确认', {
+      confirmButtonText: '确定删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await projectApi.delete(id)
+    ElMessage.success('已删除')
+    loadProjects()
+  } catch {}
+}
+
+async function loadProjects() {
+  const { data } = await projectApi.list()
+  projects.value = data
+}
+
+async function handleCreate() {
+  if (!form.value.name.trim()) {
+    ElMessage.warning('请输入项目名称')
+    return
+  }
+  creating.value = true
+  try {
+    await projectApi.create(form.value)
+    ElMessage.success('项目创建成功')
+    showCreateDialog.value = false
+    loadProjects()
+  } finally {
+    creating.value = false
+  }
+}
+
+function formatDate(s: string) {
+  return new Date(s).toLocaleDateString('zh-CN')
+}
+
+onMounted(loadProjects)
+</script>
+
+<style scoped>
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 20px;
+}
+.project-card {
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+.project-card:hover {
+  transform: translateY(-3px);
+}
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.project-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+.project-desc {
+  color: #909399;
+  font-size: 13px;
+  margin-bottom: 12px;
+  min-height: 20px;
+}
+.project-meta {
+  display: flex;
+  gap: 20px;
+  font-size: 13px;
+  color: #606266;
+  margin-bottom: 10px;
+}
+.project-meta span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.project-classes {
+  margin-bottom: 10px;
+}
+.project-time {
+  font-size: 12px;
+  color: #c0c4cc;
+}
+.class-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+</style>

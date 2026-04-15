@@ -1,0 +1,331 @@
+<template>
+  <div class="infer-page">
+    <!-- 顶部参数栏 -->
+    <div class="top-bar">
+      <div class="top-left">
+        <el-button text @click="router.push(`/project/${id}`)"><el-icon><ArrowLeft /></el-icon></el-button>
+        <b>在线推断</b>
+      </div>
+      <div class="top-controls">
+        <el-select v-model="selModelIdx" placeholder="选择模型" style="width:260px" size="small">
+          <el-option v-for="(m,i) in models" :key="i" :label="m.label" :value="i" />
+        </el-select>
+        <el-select v-model="device" style="width:180px" size="small">
+          <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" :disabled="!d.available" />
+        </el-select>
+        <span class="p-label">置信度</span>
+        <el-input-number v-model="conf" :min="0.01" :max="0.99" :step="0.05" :precision="2" size="small" style="width:100px" />
+        <span class="p-label">IoU</span>
+        <el-input-number v-model="iou" :min="0.1" :max="0.95" :step="0.05" :precision="2" size="small" style="width:100px" />
+        <span class="p-label">长边缩放</span>
+        <el-input-number v-model="resizeSize" :min="0" :max="8192" :step="256" size="small" style="width:110px" />
+        <el-tooltip content="0=不缩放，等比缩放长边到指定尺寸（如4096×2048设1024→1024×512）" placement="bottom">
+          <el-icon style="color:#aaa;cursor:help"><QuestionFilled /></el-icon>
+        </el-tooltip>
+        <el-upload :auto-upload="false" :show-file-list="false" :on-change="onUpload" accept=".bmp,.png,.jpg,.jpeg,.tif,.tiff" multiple>
+          <el-button type="primary" :loading="inferring" size="small"><el-icon><Upload /></el-icon> 推断</el-button>
+        </el-upload>
+      </div>
+    </div>
+
+    <div class="main-body">
+      <!-- 左侧：推断历史 -->
+      <div class="history-panel">
+        <div class="hp-header">
+          <span>推断记录</span>
+          <el-button text size="small" type="danger" @click="clearHistory" :disabled="history.length===0">清空</el-button>
+        </div>
+        <div class="hp-list">
+          <div v-for="r in history" :key="r.id" :class="['hp-item',{active:selId===r.id}]" @click="selectRecord(r)">
+            <img :src="r.overlay_url" class="hp-thumb" loading="lazy" />
+            <div class="hp-info">
+              <div class="hp-name">{{ r.filename }}</div>
+              <div :class="['hp-status', r.num_detections>0?'defect':'ok']">
+                {{ r.num_detections>0 ? r.num_detections+' 缺陷' : '✓ OK' }}
+              </div>
+              <div class="hp-meta">{{ r.inference_time }}s · {{ r.device }}</div>
+            </div>
+            <el-button text size="small" class="hp-del" @click.stop="delRecord(r.id)"><el-icon><Delete /></el-icon></el-button>
+          </div>
+          <div v-if="history.length===0" class="hp-empty">暂无记录</div>
+        </div>
+      </div>
+
+      <!-- 中间：大图查看器 -->
+      <div class="viewer">
+        <template v-if="current">
+          <!-- 视图切换 -->
+          <div class="view-bar">
+            <el-radio-group v-model="viewMode" size="small">
+              <el-radio-button label="overlay">检测结果</el-radio-button>
+              <el-radio-button label="original">原图</el-radio-button>
+              <el-radio-button label="mask">Mask</el-radio-button>
+              <el-radio-button label="compare">同时显示</el-radio-button>
+            </el-radio-group>
+            <div class="view-stats">
+              <b :style="{color:current.num_detections>0?'#F56C6C':'#67C23A'}">{{ current.num_detections }}</b> 缺陷
+              · {{ current.inference_time }}s
+              · {{ current.filename }}
+              <span style="margin-left:12px;color:#aaa">滚轮缩放 · 拖拽移动 · 双击还原</span>
+            </div>
+          </div>
+
+          <!-- 单图模式 -->
+          <div v-if="viewMode!=='compare'" class="img-container" ref="imgContainer"
+            @wheel.prevent="onWheel" @mousedown="onDragStart" @dblclick="resetZoom">
+            <img :src="currentSrc" class="zoom-img" :style="imgStyle" draggable="false" />
+          </div>
+
+          <!-- 对比模式 -->
+          <div v-else class="compare-container">
+            <div class="cmp-cell" v-for="v in ['original','overlay','mask']" :key="v">
+              <div class="cmp-label">{{ {original:'原图',overlay:'检测结果',mask:'Mask'}[v] }}</div>
+              <div class="cmp-img-wrap" @wheel.prevent="e=>onWheelCmp(e,v)" @mousedown="e=>onDragStartCmp(e,v)" @dblclick="resetZoomCmp(v)">
+                <img :src="current[v+'_url']" class="zoom-img" :style="cmpStyles[v]" draggable="false" />
+              </div>
+            </div>
+          </div>
+
+          <!-- 检测详情 -->
+          <div v-if="current.detections.length>0" class="detail-bar">
+            <el-table :data="current.detections" stripe size="small" max-height="160" style="width:100%">
+              <el-table-column type="index" label="#" width="45" />
+              <el-table-column label="类别" width="65"><template #default="{row}"><el-tag size="small">C{{row.class_id}}</el-tag></template></el-table-column>
+              <el-table-column label="置信度" width="80"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(1)}}%</b></template></el-table-column>
+              <el-table-column label="位置"><template #default="{row}">({{row.bbox.x1}},{{row.bbox.y1}})→({{row.bbox.x2}},{{row.bbox.y2}})</template></el-table-column>
+              <el-table-column label="尺寸" width="90"><template #default="{row}">{{row.bbox.x2-row.bbox.x1}}×{{row.bbox.y2-row.bbox.y1}}</template></el-table-column>
+            </el-table>
+          </div>
+        </template>
+
+        <!-- 空状态 -->
+        <div v-else class="empty-state">
+          <el-upload drag :auto-upload="false" :show-file-list="false" :on-change="onUpload"
+            accept=".bmp,.png,.jpg,.jpeg,.tif,.tiff" multiple style="width:460px">
+            <el-icon style="font-size:48px;color:#c0c4cc"><UploadFilled /></el-icon>
+            <div style="margin-top:8px;color:#606266">拖拽图片或点击选择</div>
+            <div style="font-size:12px;color:#aaa;margin-top:4px">支持多选 · BMP/PNG/JPG/TIFF</div>
+          </el-upload>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading -->
+    <div v-if="inferring" class="loading-overlay">
+      <el-icon class="is-loading" style="font-size:36px;color:#409EFF"><Loading /></el-icon>
+      <div style="color:#fff;margin-top:10px">{{ inferMsg }}</div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted, reactive } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import api from '../api/index'
+import type { UploadFile } from 'element-plus'
+
+const props = defineProps<{ id: string }>()
+const router = useRouter()
+// URLs already include /api prefix
+
+interface ModelInfo { task_id:number; model_format:string; label:string; model_path:string }
+interface Det { class_id:number; confidence:number; bbox:{x1:number;y1:number;x2:number;y2:number} }
+interface Rec { id:number; filename:string; num_detections:number; inference_time:number; detections:Det[]; original_url:string; overlay_url:string; mask_url:string; device:string; created_at:string|null }
+
+interface DeviceInfo { id:string; name:string; available:boolean }
+
+const models = ref<ModelInfo[]>([])
+const devices = ref<DeviceInfo[]>([{id:'cpu',name:'CPU',available:true}])
+const selModelIdx = ref<number|null>(null)
+const device = ref('cpu')
+const conf = ref(0.15)
+const iou = ref(0.5)
+const resizeSize = ref(0)
+const inferring = ref(false)
+const inferMsg = ref('')
+const viewMode = ref<'original'|'overlay'|'mask'|'compare'>('overlay')
+
+const history = ref<Rec[]>([])
+const selId = ref<number|null>(null)
+const current = computed(() => history.value.find(r => r.id === selId.value) || null)
+const currentSrc = computed(() => {
+  if (!current.value) return ''
+  return current.value[(viewMode.value === 'compare' ? 'overlay' : viewMode.value) + '_url']
+})
+
+const selModel = computed(() => selModelIdx.value !== null ? models.value[selModelIdx.value] : null)
+
+// ---- 缩放状态 ----
+const imgContainer = ref<HTMLElement>()
+const zoom = ref(1)
+const panX = ref(0)
+const panY = ref(0)
+let dragging = false, dragStartX = 0, dragStartY = 0, startPanX = 0, startPanY = 0
+
+const imgStyle = computed(() => ({
+  transform: `translate(${panX.value}px, ${panY.value}px) scale(${zoom.value})`,
+  cursor: dragging ? 'grabbing' : 'grab',
+}))
+
+function onWheel(e: WheelEvent) {
+  const d = e.deltaY > 0 ? 0.9 : 1.1
+  zoom.value = Math.max(0.1, Math.min(20, zoom.value * d))
+}
+function onDragStart(e: MouseEvent) {
+  dragging = true; dragStartX = e.clientX; dragStartY = e.clientY; startPanX = panX.value; startPanY = panY.value
+  const onMove = (ev: MouseEvent) => { panX.value = startPanX + ev.clientX - dragStartX; panY.value = startPanY + ev.clientY - dragStartY }
+  const onUp = () => { dragging = false; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+}
+function resetZoom() { zoom.value = 1; panX.value = 0; panY.value = 0 }
+
+// ---- 对比模式缩放（3个独立） ----
+const cmpZoom = reactive<Record<string,{z:number;x:number;y:number}>>({
+  original:{z:1,x:0,y:0}, overlay:{z:1,x:0,y:0}, mask:{z:1,x:0,y:0}
+})
+const cmpStyles = computed(() => {
+  const r: Record<string,any> = {}
+  for (const k of ['original','overlay','mask']) {
+    const s = cmpZoom[k]
+    r[k] = { transform: `translate(${s.x}px,${s.y}px) scale(${s.z})`, cursor: 'grab' }
+  }
+  return r
+})
+function onWheelCmp(e: WheelEvent, k: string) {
+  const d = e.deltaY > 0 ? 0.9 : 1.1
+  cmpZoom[k].z = Math.max(0.1, Math.min(20, cmpZoom[k].z * d))
+}
+function onDragStartCmp(e: MouseEvent, k: string) {
+  const sx = e.clientX, sy = e.clientY, ox = cmpZoom[k].x, oy = cmpZoom[k].y
+  const mv = (ev: MouseEvent) => { cmpZoom[k].x = ox + ev.clientX - sx; cmpZoom[k].y = oy + ev.clientY - sy }
+  const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up) }
+  window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up)
+}
+function resetZoomCmp(k: string) { cmpZoom[k] = {z:1,x:0,y:0} }
+
+// ---- 数据加载 ----
+onMounted(async () => {
+  const { data: m } = await api.get('/inference/models', { params: { project_id: props.id } })
+  models.value = m
+  if (m.length > 0) selModelIdx.value = 0
+  // 加载可用设备
+  try {
+    const { data: d } = await api.get('/inference/devices')
+    devices.value = d
+    // 默认选第一个可用的
+    const first = d.find((x: DeviceInfo) => x.available)
+    if (first) device.value = first.id
+  } catch {}
+  await loadHistory()
+})
+
+async function loadHistory() {
+  const { data } = await api.get('/inference/history', { params: { project_id: props.id, page_size: 100 } })
+  history.value = data.items
+  if (data.items.length > 0 && !selId.value) selId.value = data.items[0].id
+}
+
+function selectRecord(r: Rec) {
+  selId.value = r.id
+  resetZoom()
+  for (const k of ['original','overlay','mask']) cmpZoom[k] = {z:1,x:0,y:0}
+}
+
+// ---- 推断 ----
+async function onUpload(file: UploadFile) {
+  if (!file.raw) return
+  if (!selModel.value) { ElMessage.warning('请先选择模型'); return }
+  await runInfer([file.raw])
+}
+
+async function runInfer(files: File[]) {
+  if (!selModel.value) return
+  inferring.value = true
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i]
+    inferMsg.value = files.length > 1 ? `${i+1}/${files.length} ${f.name}` : f.name
+    try {
+      const fd = new FormData()
+      fd.append('file', f)
+      fd.append('project_id', props.id)
+      fd.append('task_id', String(selModel.value.task_id))
+      fd.append('model_path', selModel.value.model_path)
+      fd.append('conf', String(conf.value))
+      fd.append('iou', String(iou.value))
+      fd.append('resize_size', String(resizeSize.value))
+      fd.append('device', device.value)
+      const { data } = await api.post('/inference/run', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' }, timeout: 300000,
+      })
+      history.value.unshift(data)
+      selId.value = data.id
+    } catch { ElMessage.error(`${f.name} 推断失败`) }
+  }
+  inferring.value = false
+  resetZoom()
+}
+
+async function delRecord(rid: number) {
+  await api.delete(`/inference/history/${rid}`)
+  history.value = history.value.filter(r => r.id !== rid)
+  if (selId.value === rid) selId.value = history.value.length > 0 ? history.value[0].id : null
+}
+
+async function clearHistory() {
+  try { await ElMessageBox.confirm('确定清空所有推断记录？','清空',{type:'warning'}) } catch { return }
+  await api.delete('/inference/history', { params: { project_id: props.id } })
+  history.value = []; selId.value = null
+}
+</script>
+
+<style scoped>
+.infer-page { display:flex; flex-direction:column; height:100vh; background:#f0f2f5; }
+
+.top-bar { display:flex; justify-content:space-between; align-items:center; padding:6px 14px; background:#fff; border-bottom:1px solid #e4e7ed; flex-shrink:0; }
+.top-left { display:flex; align-items:center; gap:6px; }
+.top-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.p-label { font-size:12px; color:#909399; }
+
+.main-body { display:flex; flex:1; overflow:hidden; }
+
+/* 左侧历史 */
+.history-panel { width:220px; background:#fff; border-right:1px solid #e4e7ed; display:flex; flex-direction:column; flex-shrink:0; }
+.hp-header { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; font-size:13px; font-weight:600; color:#303133; border-bottom:1px solid #eee; }
+.hp-list { flex:1; overflow-y:auto; }
+.hp-item { display:flex; gap:6px; padding:6px 8px; cursor:pointer; border-bottom:1px solid #f5f5f5; align-items:center; transition:background .15s; position:relative; }
+.hp-item:hover { background:#f5f7fa; }
+.hp-item.active { background:#ecf5ff; border-left:3px solid #409EFF; }
+.hp-thumb { width:44px; height:44px; object-fit:cover; border-radius:4px; background:#eee; flex-shrink:0; }
+.hp-info { flex:1; min-width:0; }
+.hp-name { font-size:10px; color:#606266; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hp-status { font-size:11px; font-weight:600; }
+.hp-status.defect { color:#F56C6C; }
+.hp-status.ok { color:#67C23A; }
+.hp-meta { font-size:10px; color:#c0c4cc; }
+.hp-del { position:absolute; right:4px; top:4px; opacity:0; transition:opacity .15s; }
+.hp-item:hover .hp-del { opacity:1; }
+.hp-empty { text-align:center; color:#c0c4cc; padding:40px 0; font-size:13px; }
+
+/* 查看器 */
+.viewer { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+.view-bar { display:flex; justify-content:space-between; align-items:center; padding:8px 14px; background:#fff; border-bottom:1px solid #e4e7ed; flex-shrink:0; }
+.view-stats { font-size:12px; color:#909399; }
+
+/* 单图缩放容器 */
+.img-container { flex:1; overflow:hidden; background:#111; display:flex; justify-content:center; align-items:center; user-select:none; }
+.zoom-img { max-width:100%; max-height:100%; object-fit:contain; transform-origin:center center; transition:none; }
+
+/* 对比模式 */
+.compare-container { flex:1; display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; background:#111; overflow:hidden; }
+.cmp-cell { display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+.cmp-label { text-align:center; font-size:11px; color:#888; padding:4px 0; background:#1a1a1a; flex-shrink:0; }
+.cmp-img-wrap { flex:1; overflow:hidden; display:flex; justify-content:center; align-items:center; user-select:none; }
+
+/* 检测详情 */
+.detail-bar { padding:6px 14px; background:#fff; border-top:1px solid #e4e7ed; flex-shrink:0; max-height:180px; overflow-y:auto; }
+
+.empty-state { flex:1; display:flex; justify-content:center; align-items:center; }
+
+.loading-overlay { position:fixed; top:0; left:0; right:0; bottom:0; z-index:9999; background:rgba(0,0,0,.55); display:flex; flex-direction:column; justify-content:center; align-items:center; }
+</style>
