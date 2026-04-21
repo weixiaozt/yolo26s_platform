@@ -77,6 +77,13 @@ def load_model(model_path: str, model_type: str = "auto", device: str = None):
     
     # OpenVINO 模型: 传入 .xml 文件时，使用模型目录
     if model_type == "openvino":
+        # OpenVINO 2026+ 兼容修复
+        try:
+            import sys as _sys, openvino as _ov
+            if 'openvino.runtime' not in _sys.modules:
+                _sys.modules['openvino.runtime'] = _ov
+        except ImportError:
+            pass
         # Ultralytics 需要加载模型目录（包含 .xml 和 .bin），不是 .xml 文件本身
         model_dir = model_path.parent
         model = YOLO(str(model_dir))
@@ -286,7 +293,15 @@ def infer_single_image(
     
     orig_h, orig_w = image.shape[:2]
 
-    # ---- 灰度图转三通道 ----
+    # ---- 保存原图用于可视化（避免三通道形态学色差）----
+    if len(image.shape) == 2:
+        display_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif image.shape[2] == 1:
+        display_image = cv2.cvtColor(image[:, :, 0], cv2.COLOR_GRAY2BGR)
+    else:
+        display_image = image.copy()
+
+    # ---- 灰度图转三通道（用于模型推断）----
     if use_morphology:
         # 形态学三通道：B=原图, G=膨胀, R=腐蚀（与训练时一致）
         from core.preprocess import create_morphology_triple_channel
@@ -306,6 +321,7 @@ def infer_single_image(
             new_w = int(orig_w * scale)
             new_h = int(orig_h * scale)
             image_3ch = cv2.resize(image_3ch, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            display_image = cv2.resize(display_image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
             orig_h, orig_w = new_h, new_w
 
     # ---- 边缘 Padding ----
@@ -428,8 +444,10 @@ def infer_single_image(
                 trimmed_masks.append(np.zeros((orig_h, orig_w), dtype=np.uint8))
         final_masks = trimmed_masks
 
-    # ---- 生成可视化图像 ----
-    overlay = _draw_overlay(image_3ch, final_boxes, final_scores, final_classes, final_masks)
+    # ---- 生成可视化图像（使用原图而非形态学三通道图，避免色差）----
+    overlay = _draw_overlay(display_image, final_boxes, final_scores, final_classes, final_masks)
+    # 同时生成形态学三通道叠加图（供用户切换查看）
+    overlay_morph = _draw_overlay(image_3ch, final_boxes, final_scores, final_classes, final_masks) if use_morphology else None
     mask_image = _draw_mask_image(orig_h, orig_w, final_classes, final_masks)
     
     # ---- 计算检测时间 ----
@@ -441,6 +459,7 @@ def infer_single_image(
         "classes": final_classes,
         "masks": final_masks,
         "overlay": overlay,
+        "overlay_morph": overlay_morph,
         "mask_image": mask_image,
         "num_detections": len(final_boxes),
         "inference_time": elapsed_time,  # 检测时间（秒）

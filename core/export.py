@@ -18,6 +18,17 @@ from pathlib import Path
 from typing import Optional, Callable
 
 
+def _fix_openvino_compat():
+    """OpenVINO 2026+ 移除了 openvino.runtime，注册兼容别名"""
+    try:
+        import openvino
+        import sys
+        if 'openvino.runtime' not in sys.modules:
+            sys.modules['openvino.runtime'] = openvino
+    except ImportError:
+        pass
+
+
 def run_export(
     model_path: str,
     output_dir: str,
@@ -128,51 +139,8 @@ def run_export(
                     "OpenVINO 库未安装。请运行: pip install openvino>=2024.0"
                 )
 
-            # ── nncf / openvino 2024.x 兼容补丁 ────────────────────────────
-            # openvino 2024.x 将完整 API 放在 openvino.runtime 下，
-            # nncf 仍按旧约定直接访问 openvino.Node / import openvino.op 等。
-            # 三步修复：
-            #   1) 普通属性：从 openvino.runtime 批量 setattr 补到顶层
-            #   2) 直接子模块：注册到 sys.modules（op / opset* …）
-            #   3) utils 子模块：openvino.runtime.utils.* → openvino.utils.*
-            # ────────────────────────────────────────────────────────────────
-            import sys as _sys
-            import importlib as _importlib
-            import pkgutil as _pkgutil
-            import openvino.runtime as _ovrt
-
-            # 1) 补普通属性
-            for _attr in dir(_ovrt):
-                if not _attr.startswith('_') and not hasattr(openvino, _attr):
-                    setattr(openvino, _attr, getattr(_ovrt, _attr))
-
-            # 2) 补直接子模块（op / opset1-15 / opset_utils / exceptions）
-            for _finder, _sm, _ispkg in _pkgutil.iter_modules(_ovrt.__path__):
-                _ov_full  = f'openvino.{_sm}'
-                _rt_full  = f'openvino.runtime.{_sm}'
-                if _ov_full not in _sys.modules:
-                    try:
-                        _mod = _importlib.import_module(_rt_full)
-                        _sys.modules[_ov_full] = _mod
-                        setattr(openvino, _sm, _mod)
-                    except ImportError:
-                        pass
-
-            # 3) 补 openvino.utils.* → openvino.runtime.utils.*
-            #    openvino.utils 是 flat module（非包），子模块无法自动找到，
-            #    手动注册到 sys.modules 并挂到 openvino.utils 属性上
-            import openvino.utils as _ov_utils
-            import openvino.runtime.utils as _rt_utils
-            for _finder, _sm, _ispkg in _pkgutil.iter_modules(_rt_utils.__path__):
-                _ov_sub = f'openvino.utils.{_sm}'
-                _rt_sub = f'openvino.runtime.utils.{_sm}'
-                if _ov_sub not in _sys.modules:
-                    try:
-                        _mod = _importlib.import_module(_rt_sub)
-                        _sys.modules[_ov_sub] = _mod
-                        setattr(_ov_utils, _sm, _mod)  # 支持 from openvino.utils import X
-                    except ImportError:
-                        pass
+            # OpenVINO 2026+ 兼容修复
+            _fix_openvino_compat()
 
             # 重新加载模型导出 OpenVINO
             model2 = YOLO(str(model_path))

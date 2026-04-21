@@ -28,4 +28,3 @@ ultralytics>=8.3.0
 torch>=2.0.0
 torchvision>=0.15.0
 matplotlib>=3.7.0
-pandas>=2.0.0

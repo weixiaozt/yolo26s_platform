@@ -369,7 +369,8 @@ def run_train(
         batch=batch_size,
         patience=patience,
         device=device,
-        workers=8,
+        workers=0,
+        cache="ram",
         # 数据增广
         hsv_h=augment_hsv_h,
         hsv_s=augment_hsv_s,

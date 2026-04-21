@@ -13,12 +13,13 @@
 4. [安装 MySQL](#4-安装-mysql)
 5. [安装 Redis](#5-安装-redis)
 6. [部署后端](#6-部署后端)
-7. [部署前端](#7-部署前端)
-8. [配置开机自启](#8-配置开机自启)
-9. [局域网访问配置](#9-局域网访问配置)
-10. [验证部署](#10-验证部署)
-11. [日常维护](#11-日常维护)
-12. [常见问题](#12-常见问题)
+7. [启动 Celery Worker](#7-启动-celery-worker)
+8. [部署前端](#8-部署前端)
+9. [配置开机自启](#9-配置开机自启)
+10. [局域网访问配置](#10-局域网访问配置)
+11. [验证部署](#11-验证部署)
+12. [日常维护](#12-日常维护)
+13. [常见问题](#13-常见问题)
 
 ---
 
@@ -177,39 +178,51 @@ pip install -r server/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simp
 pip install openvino onnx onnxslim onnxruntime -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-### 6.5（可选）安装 GPU 版 PyTorch
+### 6.5（可选）安装 GPU 支持
 
-如果有 NVIDIA 显卡：
+> 如果没有 NVIDIA 显卡，跳过这一节，平台会自动使用 CPU。
+
+**第一步：安装 NVIDIA 驱动和 CUDA**
+
+访问 NVIDIA 驱动下载页：https://www.nvidia.com/Download/index.aspx
+
+选择你的显卡型号下载并安装。安装完后打开 PowerShell 验证：
 
 ```powershell
+nvidia-smi
+```
+
+能看到显卡信息说明驱动安装成功，记录 `CUDA Version` 的数字（例如 12.4）。
+
+**第二步：安装 GPU 版 PyTorch**
+
+```powershell
+# CUDA 12.4 及以上用这个：
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
+> 安装约 2.5GB，耐心等待。
+
 ### 6.6 创建 .env 配置文件
 
-在 `D:\yolo26s_platform\` 下创建文件 `.env`，内容如下：
+项目已包含 `.env.example`，复制一份改名即可：
+
+```powershell
+cd D:\yolo26s_platform
+copy .env.example .env
+```
+
+然后用记事本打开 `.env`，**至少修改以下两项**：
 
 ```ini
-# 数据库（密码改成你安装 MySQL 时设的）
+# 1. 数据库密码改成你安装 MySQL 时设的密码
 DATABASE_URL=mysql+pymysql://root:123456@localhost:3306/yolo_seg?charset=utf8mb4
 
-# Redis
-REDIS_URL=redis://localhost:6379/0
-
-# 文件存储
-STORAGE_ROOT=D:\yolo26s_platform\storage
-
-# 服务配置
-HOST=0.0.0.0
-PORT=8000
-DEBUG=False
-
-# 前端地址（CORS）
-CORS_ORIGINS=["http://localhost:5174","http://localhost:80","http://localhost"]
-
-# JWT 密钥（随便改一个复杂字符串）
-JWT_SECRET=your_company_secret_key_change_this
+# 2. JWT 密钥改成随机字符串（保密，别让人知道）
+JWT_SECRET=your_company_secret_key_change_this_to_something_random
 ```
+
+> 其他配置（Redis、端口、CORS）保持默认即可。
 
 ### 6.7 测试后端启动
 
@@ -233,7 +246,36 @@ uvicorn server.main:app --host 0.0.0.0 --port 8000
 
 ---
 
-## 7. 部署前端
+## 7. 启动 Celery Worker
+
+> ⚠️ Celery Worker 是训练任务的核心调度器，**不启动则训练任务会一直卡在"排队中"**，标注和推断功能不受影响。
+
+### 7.1 启动 Celery
+
+新打开一个 PowerShell 窗口，执行：
+
+```powershell
+cd D:\yolo26s_platform
+venv\Scripts\activate
+set PYTHONPATH=D:\yolo26s_platform
+celery -A server.tasks worker --loglevel=info --pool=solo
+```
+
+看到以下信息说明启动成功：
+
+```
+[tasks]
+  . server.tasks.train_model
+  . server.tasks.run_inference
+
+[2026-xx-xx xx:xx:xx,xxx: INFO/MainProcess] celery@hostname ready.
+```
+
+> Celery 窗口需要一直保持运行，关闭窗口即停止训练调度。
+
+---
+
+## 8. 部署前端（不要漏这一步）
 
 ### 7.1 安装前端依赖
 
@@ -274,76 +316,22 @@ npx vite --host 0.0.0.0 --port 5174
 
 ---
 
-## 8. 配置开机自启
+## 9. 配置开机自启
 
-创建 3 个启动脚本，让电脑开机自动运行。
+### 9.1 启动脚本说明
 
-### 8.1 创建启动脚本
+项目根目录已包含 4 个启动脚本，**无需手动创建**：
 
-在 `D:\yolo26s_platform\` 下创建 3 个文件：
+| 文件 | 作用 |
+|------|------|
+| `start_backend.bat` | 启动后端 API（端口 8000） |
+| `start_celery.bat` | 启动 Celery 训练调度器 |
+| `start_frontend.bat` | 启动前端（端口 5174） |
+| `start_all.bat` | 一键启动全部 ✅ 推荐使用 |
 
-**文件 1：`start_backend.bat`**
+> ⚠️ 脚本中路径硬编码为 `D:\yolo26s_platform`，如果你解压到了其他目录，需要用记事本打开 4 个 bat 文件，将路径替换为实际路径。
 
-```bat
-@echo off
-title YOLO Backend
-cd /d D:\yolo26s_platform
-call venv\Scripts\activate
-uvicorn server.main:app --host 0.0.0.0 --port 8000
-pause
-```
-
-**文件 2：`start_celery.bat`**
-
-```bat
-@echo off
-title YOLO Celery Worker
-cd /d D:\yolo26s_platform
-call venv\Scripts\activate
-set PYTHONPATH=D:\yolo26s_platform
-celery -A server.tasks worker --loglevel=info --pool=solo
-pause
-```
-
-**文件 3：`start_frontend.bat`**
-
-```bat
-@echo off
-title YOLO Frontend
-cd /d D:\yolo26s_platform\web
-npx vite --host 0.0.0.0 --port 5174
-pause
-```
-
-**文件 4：`start_all.bat`**（一键启动全部）
-
-```bat
-@echo off
-echo ========================================
-echo   YOLO26s-Seg 缺陷检测平台 启动中...
-echo ========================================
-
-echo [1/3] 启动后端...
-start "" /min "D:\yolo26s_platform\start_backend.bat"
-timeout /t 5 /nobreak >nul
-
-echo [2/3] 启动 Celery...
-start "" /min "D:\yolo26s_platform\start_celery.bat"
-timeout /t 3 /nobreak >nul
-
-echo [3/3] 启动前端...
-start "" /min "D:\yolo26s_platform\start_frontend.bat"
-timeout /t 3 /nobreak >nul
-
-echo ========================================
-echo   全部启动完成！
-echo   访问地址: http://localhost:5174
-echo   默认账号: admin / admin123
-echo ========================================
-pause
-```
-
-### 8.2 设置开机自启
+### 9.2 设置开机自启
 
 1. 按 `Win + R`，输入 `shell:startup`，回车
 2. 打开了一个文件夹（启动目录）
@@ -352,16 +340,16 @@ pause
 
 这样每次开机会自动启动全部服务。
 
-### 8.3 手动启动/停止
+### 9.3 手动启动/停止
 
 - **启动**：双击 `start_all.bat`
-- **停止**：关闭 3 个黑色命令行窗口
+- **停止**：关闭 3 个黑色命令行窗口（Backend / Celery Worker / Frontend）
 
 ---
 
-## 9. 局域网访问配置
+## 10. 局域网访问配置
 
-### 9.1 查看本机 IP
+### 10.1 查看本机 IP
 
 ```powershell
 ipconfig
@@ -369,7 +357,7 @@ ipconfig
 
 找到 `以太网适配器` 或 `无线局域网适配器` 下的 `IPv4 地址`，例如：`192.168.1.100`
 
-### 9.2 防火墙放行
+### 10.2 防火墙放行
 
 管理员 PowerShell 执行：
 
@@ -381,7 +369,7 @@ netsh advfirewall firewall add rule name="YOLO-Backend-8000" dir=in action=allow
 netsh advfirewall firewall add rule name="YOLO-Frontend-5174" dir=in action=allow protocol=tcp localport=5174
 ```
 
-### 9.3 同事访问
+### 10.3 同事访问
 
 告诉同事在浏览器打开：
 
@@ -391,7 +379,7 @@ http://192.168.1.100:5174
 
 （把 192.168.1.100 换成你的实际 IP）
 
-### 9.4 固定 IP（推荐）
+### 10.4 固定 IP（推荐）
 
 为了避免 IP 变化，建议设置静态 IP：
 
@@ -405,22 +393,22 @@ http://192.168.1.100:5174
 
 ---
 
-## 10. 验证部署
+## 11. 验证部署
 
-### 10.1 本机测试
+### 11.1 本机测试
 
 1. 双击 `start_all.bat` 启动所有服务
 2. 浏览器打开 `http://localhost:5174`
 3. 用 `admin / admin123` 登录
 4. 能看到项目管理页面 → 成功
 
-### 10.2 局域网测试
+### 11.2 局域网测试
 
 1. 让同事打开浏览器
 2. 访问 `http://你的IP:5174`
 3. 能看到登录页 → 成功
 
-### 10.3 功能检查清单
+### 11.3 功能检查清单
 
 | 功能 | 测试方法 |
 |------|---------|
@@ -434,9 +422,9 @@ http://192.168.1.100:5174
 
 ---
 
-## 11. 日常维护
+## 12. 日常维护
 
-### 11.1 数据库备份
+### 12.1 数据库备份
 
 创建 `D:\yolo26s_platform\backup.bat`：
 
@@ -452,19 +440,19 @@ pause
 
 双击即可备份。建议每周备份一次。
 
-### 11.2 数据库恢复
+### 12.2 数据库恢复
 
 ```powershell
 mysql -u root -p123456 yolo_seg < D:\yolo26s_platform\backups\backup_20260415.sql
 ```
 
-### 11.3 更新代码
+### 12.3 更新代码
 
 1. 停止所有服务（关闭 3 个窗口）
 2. 用新的文件覆盖 `D:\yolo26s_platform\`（保留 `.env` 和 `storage` 文件夹）
 3. 双击 `start_all.bat` 重新启动
 
-### 11.4 查看磁盘占用
+### 12.4 查看磁盘占用
 
 ```powershell
 # 查看 storage 文件夹大小
@@ -475,7 +463,7 @@ dir D:\yolo26s_platform\storage /s
 
 ---
 
-## 12. 常见问题
+## 13. 常见问题
 
 ### Q: 同事访问不了？
 
@@ -528,20 +516,24 @@ net start redis
 
 ```
 D:\yolo26s_platform\
-├── .env                    ← 配置文件（需要手动创建）
-├── start_all.bat           ← 一键启动（需要手动创建）
+├── .env.example            ← 配置模板（复制为 .env 后修改）
+├── .env                    ← 实际配置文件（需要手动从 .env.example 复制创建）
+├── start_all.bat           ← 一键启动全部 ✅
 ├── start_backend.bat       ← 后端启动脚本
-├── start_celery.bat        ← Celery 启动脚本
+├── start_celery.bat        ← Celery 训练调度器脚本
 ├── start_frontend.bat      ← 前端启动脚本
-├── venv\                   ← Python 虚拟环境
-├── core\                   ← 核心算法模块
-├── server\                 ← 后端代码
+├── yolo26s-seg.pt          ← 预训练权重（实例分割，推荐）
+├── yolo26n.pt              ← 预训练权重（最小型）
+├── yolo26l-seg.pt          ← 预训练权重（大模型）
+├── venv\                   ← Python 虚拟环境（需要手动创建）
+├── core\                   ← 核心算法模块（预处理、训练、推断）
+├── server\                 ← 后端 API 代码
 ├── web\                    ← 前端代码
 └── storage\                ← 数据存储
-    ├── uploads\            ← 上传的图片
-    ├── datasets\           ← 训练数据集
+    ├── uploads\            ← 上传的原图
+    ├── datasets\           ← YOLO 训练数据集（自动生成）
     ├── runs\               ← 训练输出/推断结果
-    └── exports\            ← 导出的模型
+    └── exports\            ← 导出的模型文件
 ```
 
 ---

@@ -17,7 +17,9 @@ def scan_xml_classes(xml_dir: str) -> Dict[str, int]:
         try:
             tree = ET.parse(str(xml_path))
             for obj in tree.getroot().findall("object"):
-                name_elem = obj.find("name") or obj.find("n")
+                name_elem = obj.find("name")
+                if name_elem is None:
+                    name_elem = obj.find("n")
                 if name_elem is not None and name_elem.text:
                     cls = name_elem.text.strip()
                     class_counts[cls] = class_counts.get(cls, 0) + 1
@@ -46,6 +48,7 @@ def mask_to_polygons(
     if len(mask.shape) == 3:
         mask = mask[:, :, 0]
 
+    h, w = mask.shape[:2]
     annotations = []
     for pixel_val, class_index in class_mapping.items():
         if pixel_val == 0:
@@ -56,7 +59,8 @@ def mask_to_polygons(
             area = cv2.contourArea(contour)
             if area < min_area or len(contour) < 3:
                 continue
-            points = contour.reshape(-1, 2).tolist()
+            # 归一化到 0~1（除以 Mask 宽高）
+            points = [[round(pt[0] / w, 6), round(pt[1] / h, 6)] for pt in contour.reshape(-1, 2)]
             annotations.append({"class_index": class_index, "points": points, "area": area})
     return annotations
 
@@ -99,7 +103,9 @@ def auto_detect_pixel_class_mapping(
             xml_w, xml_h = 0, 0
 
         for obj in root.findall("object"):
-            name_elem = obj.find("name") or obj.find("n")
+            name_elem = obj.find("name")
+            if name_elem is None:
+                name_elem = obj.find("n")
             if name_elem is None or not name_elem.text:
                 continue
             cls_name = name_elem.text.strip()

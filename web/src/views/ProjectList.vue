@@ -12,6 +12,12 @@
           <el-icon><Upload /></el-icon>
           导入项目
         </el-button>
+        <el-upload :auto-upload="false" :show-file-list="false" accept=".zip" :on-change="onPackageFileChange">
+          <el-button :loading="importing">
+            <el-icon><FolderOpened /></el-icon>
+            导入项目包
+          </el-button>
+        </el-upload>
       </div>
     </div>
 
@@ -63,6 +69,14 @@
             @click.stop="handleDeleteProject(p.id, p.name)"
           >
             删除项目
+          </el-button>
+          <el-button
+            type="primary" text size="small"
+            style="float: right; margin-right: 8px"
+            :loading="exportingId === p.id"
+            @click.stop="handleExport(p)"
+          >
+            导出
           </el-button>
         </div>
       </el-card>
@@ -142,6 +156,8 @@ const router = useRouter()
 const projects = ref<Project[]>([])
 const showCreateDialog = ref(false)
 const creating = ref(false)
+const exportingId = ref<number | null>(null)
+const importing = ref(false)
 
 const defaultColors = ['#FF4444', '#44BB44', '#4488FF', '#FFAA00', '#FF44FF', '#44FFFF']
 
@@ -177,6 +193,58 @@ function resetForm() {
       { class_index: 1, name: 'defect_2', color: '#44BB44' },
       { class_index: 2, name: 'defect_3', color: '#4488FF' },
     ],
+  }
+}
+
+async function handleExport(p: Project) {
+  exportingId.value = p.id
+  try {
+    const resp = await projectApi.exportPackage(p.id)
+    const blob = new Blob([resp.data as any], { type: 'application/zip' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${p.name}_export.zip`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    ElMessage.success('导出完成')
+  } catch (e: any) {
+    ElMessage.error('导出失败: ' + (e?.message || '未知错误'))
+  } finally {
+    exportingId.value = null
+  }
+}
+
+async function onPackageFileChange(f: any) {
+  const file: File = f.raw
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    ElMessage.warning('请选择 ZIP 文件')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `即将导入项目包「${file.name}」(${(file.size / 1024 / 1024).toFixed(1)} MB)，是否继续？`,
+      '导入确认',
+      { confirmButtonText: '确定导入', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  importing.value = true
+  try {
+    const { data } = await projectApi.importPackage(file)
+    const msg = data.renamed
+      ? `导入成功：项目已重命名为「${data.project_name}」，${data.image_count} 张图片 / ${data.annotation_count} 个标注`
+      : `导入成功：${data.image_count} 张图片 / ${data.annotation_count} 个标注`
+    ElMessage.success(msg)
+    loadProjects()
+  } catch (e: any) {
+    ElMessage.error('导入失败: ' + (e?.response?.data?.detail || e?.message || '未知错误'))
+  } finally {
+    importing.value = false
   }
 }
 

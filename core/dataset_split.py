@@ -118,6 +118,9 @@ def run_dataset_split(
     # ---- 划分有标注样本 ----
     random.shuffle(labeled_samples)
     split_idx = int(len(labeled_samples) * train_ratio)
+    # 确保 val 至少有 1 张（数据太少时）
+    if split_idx >= len(labeled_samples) and len(labeled_samples) > 1:
+        split_idx = len(labeled_samples) - 1
     train_labeled = labeled_samples[:split_idx]
     val_labeled = labeled_samples[split_idx:]
 

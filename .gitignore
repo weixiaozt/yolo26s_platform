@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
 venv/
 *.egg-info/
 
@@ -8,7 +9,7 @@ venv/
 node_modules/
 web/dist/
 
-# 环境配置
+# 环境配置（含密码，不提交）
 .env
 
 # 数据文件（太大不上传）
@@ -17,6 +18,9 @@ storage/datasets/*
 storage/runs/*
 storage/exports/*
 !storage/**/.gitkeep
+
+# 训练输出
+runs/
 
 # IDE
 .vscode/
@@ -28,3 +32,12 @@ Thumbs.db
 
 # 备份
 backups/
+
+# Claude Code 工作目录
+.claude/
+
+# 临时/错误日志
+kernel.errors.txt
+
+# 打包产物
+*.zip

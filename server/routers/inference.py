@@ -17,6 +17,7 @@ from ..config import settings
 from ..models.train_task import TrainTask
 from ..models.inference_result import InferenceResult
 from ..models.exported_model import ExportedModel
+from ..models.defect_class import DefectClass
 
 _root = str(Path(__file__).parent.parent.parent)
 if _root not in sys.path:
@@ -30,6 +31,14 @@ def _get_model(model_path: str):
     """加载模型（缓存）。Ultralytics 自动识别格式"""
     if model_path in _model_cache:
         return _model_cache[model_path]
+    # OpenVINO 2026+ 兼容修复
+    if "openvino" in model_path.lower():
+        try:
+            import sys as _sys, openvino as _ov
+            if 'openvino.runtime' not in _sys.modules:
+                _sys.modules['openvino.runtime'] = _ov
+        except ImportError:
+            pass
     from ultralytics import YOLO
     model = YOLO(model_path)
     _model_cache[model_path] = model
@@ -124,6 +133,7 @@ async def run_inference(
             erode_kernel = task.config.get("erode_kernel", 3)
         if not project_id and task:
             project_id = task.project_id
+    print(f"[推断] task_id={task_id}, use_morphology={use_morphology}, config_keys={list(task.config.keys()) if task and task.config else None}")
 
     # 读取图像（保持原始格式，灰度转换由 inference 内部处理）
     content = await file.read()
@@ -149,16 +159,27 @@ async def run_inference(
     infer_dir = settings.runs_path / "inference"
     infer_dir.mkdir(parents=True, exist_ok=True)
     rid = uuid.uuid4().hex[:12]
-    for name, img in [("original", img_array), ("overlay", result["overlay"]), ("mask", result["mask_image"])]:
+    save_list = [("original", img_array), ("overlay", result["overlay"]), ("mask", result["mask_image"])]
+    if result.get("overlay_morph") is not None:
+        save_list.append(("overlay_morph", result["overlay_morph"]))
+    for name, img in save_list:
         cv2.imwrite(str(infer_dir / f"{rid}_{name}.png"), img)
     url_pfx = "/static/storage/runs/inference"
+
+    # 加载类别名称映射
+    class_names = {}
+    if project_id > 0:
+        dcs = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
+        class_names = {dc.class_index: dc.name for dc in dcs}
 
     # 检测列表
     detections = []
     for i in range(result["num_detections"]):
         box = result["boxes"][i]
+        cid = int(result["classes"][i])
         detections.append({
-            "class_id": int(result["classes"][i]),
+            "class_id": cid,
+            "class_name": class_names.get(cid, f"C{cid}"),
             "confidence": round(float(result["scores"][i]), 4),
             "bbox": {"x1": int(box[0]), "y1": int(box[1]), "x2": int(box[2]), "y2": int(box[3])},
         })
@@ -173,6 +194,7 @@ async def run_inference(
         detections=detections,
         original_path=f"{url_pfx}/{rid}_original.png",
         overlay_path=f"{url_pfx}/{rid}_overlay.png",
+        overlay_morph_path=f"{url_pfx}/{rid}_overlay_morph.png" if result.get("overlay_morph") is not None else None,
         mask_path=f"{url_pfx}/{rid}_mask.png",
     )
     db.add(record); db.commit(); db.refresh(record)
@@ -185,6 +207,7 @@ async def run_inference(
         "filename": record.filename,
         "original_url": record.original_path,
         "overlay_url": record.overlay_path,
+        "overlay_morph_url": f"{url_pfx}/{rid}_overlay_morph.png" if result.get("overlay_morph") is not None else None,
         "mask_url": record.mask_path,
     }
 
@@ -196,11 +219,30 @@ def list_history(project_id: int = Query(default=0), page: int = Query(default=1
     if project_id > 0: q = q.filter(InferenceResult.project_id == project_id)
     total = q.count()
     items = q.order_by(InferenceResult.created_at.desc()).offset((page-1)*page_size).limit(page_size).all()
+
+    # 加载类别名称映射（按 project_id 分组缓存）
+    cn_cache: dict = {}
+    def get_class_names(pid: int) -> dict:
+        if pid not in cn_cache:
+            dcs = db.query(DefectClass).filter(DefectClass.project_id == pid).all()
+            cn_cache[pid] = {dc.class_index: dc.name for dc in dcs}
+        return cn_cache[pid]
+
+    def enrich(dets, pid):
+        if not dets: return []
+        names = get_class_names(pid) if pid else {}
+        for d in dets:
+            if "class_name" not in d:
+                cid = d.get("class_id", 0)
+                d["class_name"] = names.get(cid, f"C{cid}")
+        return dets
+
     return {"total": total, "page": page, "page_size": page_size, "items": [
         {"id": r.id, "filename": r.filename, "num_detections": r.num_detections,
          "inference_time": r.inference_time, "device": r.device,
-         "detections": r.detections or [],
+         "detections": enrich(r.detections or [], r.project_id),
          "original_url": r.original_path or "", "overlay_url": r.overlay_path or "",
+         "overlay_morph_url": r.overlay_morph_path,
          "mask_url": r.mask_path or "", "created_at": r.created_at.isoformat() if r.created_at else None}
         for r in items]}
 

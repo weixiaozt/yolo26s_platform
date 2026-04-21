@@ -352,7 +352,10 @@ async function loadImageAndAnnotations(){
   },{crossOrigin:'anonymous'})
   try{
     const{data}=await annotationApi.get(currentImageId.value)
-    annotations.value=data.map(a=>({class_id:a.class_id,polygon:a.polygon as Point[]}))
+    annotations.value=data.map(a=>({
+      class_id:a.class_id,
+      polygon:(a.polygon as any[]).map(p => Array.isArray(p) ? {x:p[0],y:p[1]} : {x:p.x,y:p.y})
+    }))
     await nextTick();renderAnnotations()
   }catch{annotations.value=[]}
   dirty.value=false;undoStack.value=[];redoStack.value=[];selectedAnnIdx.value=-1

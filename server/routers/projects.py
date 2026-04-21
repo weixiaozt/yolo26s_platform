@@ -3,7 +3,12 @@
 项目管理 API
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+import tempfile
+from pathlib import Path
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -15,6 +20,7 @@ from ..models.annotation import Annotation
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats, DefectClassCreate, DefectClassOut,
 )
+from ..services.project_package import export_project_to_zip, import_project_from_zip
 
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
 
@@ -125,6 +131,56 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="项目不存在")
     db.delete(project)
     db.commit()
+
+
+@router.get("/{project_id}/export-package")
+def export_package(project_id: int, db: Session = Depends(get_db)):
+    """导出项目为 ZIP（仅已标注图片）"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="proj_export_"))
+    safe_stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in project.name)
+    out_path = tmp_dir / f"{safe_stem}_export.zip"
+
+    try:
+        export_project_to_zip(project_id, db, out_path)
+    except Exception as e:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"导出失败: {e}")
+
+    download_name = f"{project.name}_export.zip"
+    return FileResponse(
+        str(out_path),
+        media_type="application/zip",
+        filename=download_name,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(download_name)}"},
+    )
+
+
+@router.post("/import-package")
+async def import_package(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """从 ZIP 导入完整项目（含图片和标注）"""
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="请上传 ZIP 文件")
+
+    tmp_path = Path(tempfile.mktemp(suffix=".zip"))
+    try:
+        content = await file.read()
+        tmp_path.write_bytes(content)
+
+        with open(tmp_path, "rb") as f:
+            result = import_project_from_zip(f, db)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"导入失败: {e}\n{traceback.format_exc()}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 @router.post("/{project_id}/classes", response_model=DefectClassOut, status_code=201)

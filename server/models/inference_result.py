@@ -25,6 +25,7 @@ class InferenceResult(Base):
     # 图像路径（存磁盘，不存base64）
     original_path = Column(String(500))
     overlay_path = Column(String(500))
+    overlay_morph_path = Column(String(500))  # 形态学三通道叠加图
     mask_path = Column(String(500))
 
     created_at = Column(DateTime, server_default=func.now())

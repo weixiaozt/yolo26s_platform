@@ -109,8 +109,12 @@ def build_dataset_from_db(
     }
 
     for image in all_images:
-        # 复制图像文件
-        src_path = settings.upload_path / image.file_path
+        # 复制图像文件（兼容绝对路径和相对路径）
+        fp = Path(image.file_path)
+        if fp.is_absolute() and fp.exists():
+            src_path = fp
+        else:
+            src_path = settings.upload_path / image.file_path
         if not src_path.exists():
             continue
 
@@ -133,11 +137,25 @@ def build_dataset_from_db(
             if cls_index is None:
                 continue
 
-            polygon = ann.polygon  # [{"x": 0.1, "y": 0.2}, ...]
+            polygon = ann.polygon  # [{"x": 0.1, "y": 0.2}, ...] 或 [[39.0, 267.0], ...]
             if len(polygon) < 3:
                 continue
 
-            coords = " ".join(f"{p['x']:.6f} {p['y']:.6f}" for p in polygon)
+            # 兼容两种格式 + 自动归一化
+            img_w = image.width or 1
+            img_h = image.height or 1
+            parts = []
+            for p in polygon:
+                if isinstance(p, dict):
+                    px, py = p['x'], p['y']
+                else:
+                    px, py = p[0], p[1]
+                # 如果坐标 > 1，说明是像素坐标，需要归一化
+                if px > 1 or py > 1:
+                    px = px / img_w
+                    py = py / img_h
+                parts.append(f"{px:.6f} {py:.6f}")
+            coords = " ".join(parts)
             lines.append(f"{cls_index} {coords}")
 
             # 统计

@@ -45,8 +45,10 @@ def create_morphology_triple_channel(
         三通道图像 (H, W, 3)，uint8
     """
     # 确保是灰度图
-    if len(image.shape) == 3:
+    if len(image.shape) == 3 and image.shape[2] >= 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    elif len(image.shape) == 3 and image.shape[2] == 1:
+        gray = image[:, :, 0]
     else:
         gray = image.copy()
     

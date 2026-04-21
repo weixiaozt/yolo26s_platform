@@ -21,7 +21,7 @@ class AnnotationOut(BaseModel):
     id: int
     image_id: int
     class_id: int
-    polygon: list[dict]
+    polygon: list  # 兼容 [{"x":0.1,"y":0.2},...] 和 [[0.1,0.2],...]
     area: Optional[float]
     bbox: Optional[dict]
     created_by: Optional[str]

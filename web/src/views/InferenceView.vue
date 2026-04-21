@@ -62,6 +62,14 @@
               <el-radio-button label="mask">Mask</el-radio-button>
               <el-radio-button label="compare">同时显示</el-radio-button>
             </el-radio-group>
+            <el-switch
+              v-if="current.overlay_morph_url"
+              v-model="showMorph"
+              active-text="形态学视图"
+              inactive-text="原图视图"
+              size="small"
+              style="margin-left:12px"
+            />
             <div class="view-stats">
               <b :style="{color:current.num_detections>0?'#F56C6C':'#67C23A'}">{{ current.num_detections }}</b> 缺陷
               · {{ current.inference_time }}s
@@ -90,7 +98,7 @@
           <div v-if="current.detections.length>0" class="detail-bar">
             <el-table :data="current.detections" stripe size="small" max-height="160" style="width:100%">
               <el-table-column type="index" label="#" width="45" />
-              <el-table-column label="类别" width="65"><template #default="{row}"><el-tag size="small">C{{row.class_id}}</el-tag></template></el-table-column>
+              <el-table-column label="类别" width="90"><template #default="{row}"><el-tag size="small">{{ row.class_name || ('C' + row.class_id) }}</el-tag></template></el-table-column>
               <el-table-column label="置信度" width="80"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(1)}}%</b></template></el-table-column>
               <el-table-column label="位置"><template #default="{row}">({{row.bbox.x1}},{{row.bbox.y1}})→({{row.bbox.x2}},{{row.bbox.y2}})</template></el-table-column>
               <el-table-column label="尺寸" width="90"><template #default="{row}">{{row.bbox.x2-row.bbox.x1}}×{{row.bbox.y2-row.bbox.y1}}</template></el-table-column>
@@ -130,8 +138,8 @@ const router = useRouter()
 // URLs already include /api prefix
 
 interface ModelInfo { task_id:number; model_format:string; label:string; model_path:string }
-interface Det { class_id:number; confidence:number; bbox:{x1:number;y1:number;x2:number;y2:number} }
-interface Rec { id:number; filename:string; num_detections:number; inference_time:number; detections:Det[]; original_url:string; overlay_url:string; mask_url:string; device:string; created_at:string|null }
+interface Det { class_id:number; class_name?:string; confidence:number; bbox:{x1:number;y1:number;x2:number;y2:number} }
+interface Rec { id:number; filename:string; num_detections:number; inference_time:number; detections:Det[]; original_url:string; overlay_url:string; overlay_morph_url?:string; mask_url:string; device:string; created_at:string|null }
 
 interface DeviceInfo { id:string; name:string; available:boolean }
 
@@ -145,13 +153,19 @@ const resizeSize = ref(0)
 const inferring = ref(false)
 const inferMsg = ref('')
 const viewMode = ref<'original'|'overlay'|'mask'|'compare'>('overlay')
+const showMorph = ref(false)
 
 const history = ref<Rec[]>([])
 const selId = ref<number|null>(null)
 const current = computed(() => history.value.find(r => r.id === selId.value) || null)
 const currentSrc = computed(() => {
   if (!current.value) return ''
-  return current.value[(viewMode.value === 'compare' ? 'overlay' : viewMode.value) + '_url']
+  const mode = viewMode.value === 'compare' ? 'overlay' : viewMode.value
+  // 检测结果模式：如果打开形态学开关且有形态学图，显示形态学版本
+  if (mode === 'overlay' && showMorph.value && current.value.overlay_morph_url) {
+    return current.value.overlay_morph_url
+  }
+  return (current.value as any)[mode + '_url']
 })
 
 const selModel = computed(() => selModelIdx.value !== null ? models.value[selModelIdx.value] : null)

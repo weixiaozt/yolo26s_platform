@@ -64,4 +64,17 @@ export const projectApi = {
 
   deleteClass: (projectId: number, classId: number) =>
     api.delete(`/projects/${projectId}/classes/${classId}`),
+
+  exportPackage: (id: number) =>
+    api.get(`/projects/${id}/export-package`, { responseType: 'blob' }),
+
+  importPackage: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<{ project_id: number; project_name: string; renamed: boolean; image_count: number; annotation_count: number }>(
+      '/projects/import-package',
+      fd,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000 }
+    )
+  },
 }

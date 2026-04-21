@@ -128,6 +128,7 @@ async def import_project(
     db.flush()
 
     # 2. 创建类别
+    class_index_to_id = {}  # class_index → defect_class.id
     for ci, info in sorted(class_defs.items()):
         dc = DefectClass(
             project_id=project.id,
@@ -136,6 +137,8 @@ async def import_project(
             color=info["color"],
         )
         db.add(dc)
+        db.flush()  # 获取 dc.id
+        class_index_to_id[ci] = dc.id
 
     # 3. 保存图片和 Mask，转换标注
     upload_dir = settings.upload_path / str(project.id)
@@ -176,11 +179,12 @@ async def import_project(
             continue
         h, w = img_array.shape[:2]
 
-        # 创建 Image 记录
+        # 创建 Image 记录（file_path 存相对路径）
+        rel_path = f"{project.id}/{saved_name}"
         image = Image(
             project_id=project.id,
             filename=img_file.filename,
-            file_path=str(img_saved_path),
+            file_path=rel_path,
             width=w, height=h,
             status="unlabeled",
         )
@@ -203,23 +207,13 @@ async def import_project(
         try:
             polygons = mask_to_polygons(str(tmp_mask_path), pixel_to_index)
 
-            # Mask 尺寸可能和原图不同，需要坐标缩放
-            mask_img = cv2.imdecode(np.frombuffer(mask_content, np.uint8), cv2.IMREAD_UNCHANGED)
-            if mask_img is not None:
-                mh, mw = mask_img.shape[:2] if len(mask_img.shape) == 2 else mask_img.shape[:2]
-                sx = w / mw if mw != w else 1.0
-                sy = h / mh if mh != h else 1.0
-            else:
-                sx, sy = 1.0, 1.0
-
             if polygons:
                 for poly in polygons:
-                    # 缩放坐标到原图尺寸
-                    scaled_points = [[p[0] * sx, p[1] * sy] for p in poly["points"]]
+                    # 坐标已归一化到 0~1，直接存储
                     ann = Annotation(
                         image_id=image.id,
-                        class_index=poly["class_index"],
-                        polygon=scaled_points,
+                        class_id=class_index_to_id.get(poly["class_index"], list(class_index_to_id.values())[0]),
+                        polygon=poly["points"],
                     )
                     db.add(ann)
                     stats["total_polygons"] += 1
