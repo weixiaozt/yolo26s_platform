@@ -218,7 +218,7 @@ copy .env.example .env
 # 1. 数据库密码改成你安装 MySQL 时设的密码
 DATABASE_URL=mysql+pymysql://root:123456@localhost:3306/yolo_seg?charset=utf8mb4
 
-# 2. JWT 密钥改成随机字符串（保密，别让人知道）
+# 2. JWT 密钥改成随机字符串（保密，别让人知道），如果报错，请注释JWT或删除JWT配置
 JWT_SECRET=your_company_secret_key_change_this_to_something_random
 ```
 
@@ -229,7 +229,7 @@ JWT_SECRET=your_company_secret_key_change_this_to_something_random
 ```powershell
 cd D:\yolo26s_platform
 venv\Scripts\activate
-uvicorn server.main:app --host 0.0.0.0 --port 8000
+$env:YOLO_AUTOINSTALL="False"; uvicorn server.main:app --host 0.0.0.0 --port 8000
 ```
 
 看到以下信息说明成功：
