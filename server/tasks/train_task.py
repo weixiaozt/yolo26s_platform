@@ -113,6 +113,29 @@ def run_training_pipeline(self, task_id: int):
                 else:
                     print(f"[警告] 找不到 Task#{resume_task_id}，回退为从头训练")
 
+        def cancel_check() -> bool:
+            """
+            被 core/train.py 周期性调用，检查训练任务是否需要中止。
+            判定条件：
+              - 任务记录已被删除（用户在前端误删了正在跑的任务）
+              - 任务状态被改成 'cancelled'（用户在前端按了取消/暂停）
+            返回 True 时，Ultralytics 会在最近的 epoch 边界停止训练。
+            用独立 session 查询，避免与外层 db 的事务隔离冲突。
+            """
+            check_db = SessionLocal()
+            try:
+                t = check_db.query(TrainTask).filter(TrainTask.id == task_id).first()
+                if t is None:
+                    return True  # 任务被删除
+                if t.status == "cancelled":
+                    return True
+                return False
+            except Exception as e:
+                print(f"[cancel_check db error] {e}")
+                return False
+            finally:
+                check_db.close()
+
         def epoch_callback(data: dict):
             """
             每个 epoch 结束后的回调。
@@ -185,9 +208,26 @@ def run_training_pipeline(self, task_id: int):
             warmup_epochs=config.get("warmup_epochs", 3.0),
             warmup_momentum=config.get("warmup_momentum", 0.8),
             epoch_callback=epoch_callback,
+            cancel_check=cancel_check,
         )
 
-        # ---- 训练完成 ----
+        # ---- 训练完成或被取消 ----
+        # 重新查一次任务状态：
+        #   - 若任务已被前端取消，状态已是 'cancelled'，不要覆盖回 completed
+        #   - 若任务记录被删除，直接退出，不写任何东西
+        task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
+        if task is None:
+            print(f"[训练任务] Task#{task_id} 已被删除，跳过完成态写入")
+            return {"status": "cancelled (deleted)"}
+
+        if task.status == "cancelled":
+            # 已被取消，记录最后产出的模型路径但保持 cancelled 状态
+            task.best_model_path = train_result.get("best_pt")
+            task.last_model_path = train_result.get("last_pt")
+            task.finished_at = datetime.now()
+            db.commit()
+            return {"status": "cancelled", "best_pt": train_result.get("best_pt")}
+
         task.status = "completed"
         task.best_model_path = train_result.get("best_pt")
         task.last_model_path = train_result.get("last_pt")

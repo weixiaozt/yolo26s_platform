@@ -120,8 +120,18 @@ def delete_train_task(task_id: int, db: Session = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    if task.status == "training":
-        raise HTTPException(status_code=400, detail="正在训练中，请先取消")
+    # 所有非终态都不允许直接删除，必须先取消（取消会真正停掉 Celery 训练循环）
+    active_states = ("pending", "preparing", "training", "exporting")
+    if task.status in active_states:
+        raise HTTPException(status_code=400, detail=f"任务处于活跃状态 ({task.status})，请先取消再删除")
+
+    # 即使是 cancelled / failed，也兜底再 revoke 一次，防止 Celery Worker 残留运行
+    if task.celery_task_id:
+        try:
+            from ..tasks import celery_app
+            celery_app.control.revoke(task.celery_task_id, terminate=True)
+        except Exception:
+            pass
 
     db.delete(task)
     db.commit()

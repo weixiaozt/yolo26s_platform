@@ -200,7 +200,8 @@ def run_train(
     warmup_momentum: float = 0.8,
     # ---- 回调 ----
     epoch_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    progress_callback: Optional[Callable] = None
+    progress_callback: Optional[Callable] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """
     执行 YOLO26s-seg 训练。
@@ -248,6 +249,30 @@ def run_train(
 
     # ---- 加载预训练模型 ----
     model = YOLO(model_name)
+
+    # ---- 注册取消检查回调 ----
+    # 在每个 epoch 开始前/结束后 + 每隔 N 个 batch 检查是否被外部取消
+    # 检测到取消时设置 trainer.stop=True，Ultralytics 训练循环会在 epoch 边界检查此标志并优雅退出
+    if cancel_check is not None:
+        _batch_check_interval = 20  # 每 20 个 batch 检查一次 DB（避免每个 batch 都查库）
+        _batch_counter = {"n": 0}
+
+        def _check_cancel(trainer):
+            try:
+                if cancel_check():
+                    print("\n[训练取消] 检测到取消信号，将在当前 epoch 结束后停止训练\n")
+                    trainer.stop = True
+            except Exception as e:
+                print(f"[cancel_check error] {e}")
+
+        def _check_cancel_batch(trainer):
+            _batch_counter["n"] += 1
+            if _batch_counter["n"] % _batch_check_interval == 0:
+                _check_cancel(trainer)
+
+        model.add_callback("on_train_epoch_start", _check_cancel)
+        model.add_callback("on_fit_epoch_end", _check_cancel)
+        model.add_callback("on_train_batch_end", _check_cancel_batch)
 
     # ---- 注册 epoch 回调 ----
     if epoch_callback is not None:
