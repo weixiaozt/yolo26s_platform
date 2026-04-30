@@ -65,6 +65,72 @@ def mask_to_polygons(
     return annotations
 
 
+def parse_voc_xml(xml_path: str) -> Dict:
+    """
+    解析单个 Pascal VOC XML 文件 → 图像信息和 bbox 列表。
+    Returns:
+        {
+            "filename": str,
+            "width": int,
+            "height": int,
+            "objects": [{"name": str, "xmin", "ymin", "xmax", "ymax"}, ...]
+        }
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    size = root.find("size")
+    w = int(size.findtext("width", "0")) if size is not None else 0
+    h = int(size.findtext("height", "0")) if size is not None else 0
+    filename = root.findtext("filename", Path(xml_path).stem)
+
+    objects = []
+    for obj in root.findall("object"):
+        name_elem = obj.find("name")
+        if name_elem is None:
+            name_elem = obj.find("n")
+        if name_elem is None or not name_elem.text:
+            continue
+        cls_name = name_elem.text.strip()
+
+        bndbox = obj.find("bndbox")
+        if bndbox is None:
+            continue
+        try:
+            xmin = float(bndbox.findtext("xmin", "0"))
+            ymin = float(bndbox.findtext("ymin", "0"))
+            xmax = float(bndbox.findtext("xmax", "0"))
+            ymax = float(bndbox.findtext("ymax", "0"))
+        except (ValueError, TypeError):
+            continue
+        if xmax <= xmin or ymax <= ymin:
+            continue
+
+        objects.append({
+            "name": cls_name,
+            "xmin": xmin, "ymin": ymin,
+            "xmax": xmax, "ymax": ymax,
+        })
+
+    return {"filename": filename, "width": w, "height": h, "objects": objects}
+
+
+def bbox_to_polygon4(xmin: float, ymin: float, xmax: float, ymax: float,
+                     img_w: int, img_h: int) -> List[Dict]:
+    """
+    将 bbox 转换为 4 点多边形（归一化 0~1），与平台 polygon 格式兼容。
+    顺序：左上 → 右上 → 右下 → 左下
+    """
+    if img_w <= 0 or img_h <= 0:
+        return []
+    return [
+        {"x": round(xmin / img_w, 6), "y": round(ymin / img_h, 6)},
+        {"x": round(xmax / img_w, 6), "y": round(ymin / img_h, 6)},
+        {"x": round(xmax / img_w, 6), "y": round(ymax / img_h, 6)},
+        {"x": round(xmin / img_w, 6), "y": round(ymax / img_h, 6)},
+    ]
+
+
 def auto_detect_pixel_class_mapping(
     xml_dir: str,
     mask_dir: str,

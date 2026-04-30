@@ -176,6 +176,7 @@ def run_train(
     batch_size: int = 16,
     patience: int = 0,
     device: str = "0",
+    task_type: str = "seg",
     # ---- 数据增广参数 ----
     augment_hsv_h: float = 0.015,
     augment_hsv_s: float = 0.7,
@@ -246,6 +247,26 @@ def run_train(
 
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- 任务类型自动适配 ----
+    # task_type='det' 时：
+    #   - 默认模型若未指定 -seg，自动使用检测版（去掉 -seg 后缀）
+    #   - close_mosaic 在小数据集下行为一致
+    is_det = (task_type == "det")
+    if is_det:
+        # 用户传 yolo26s-seg → 自动改 yolo26n.pt（项目里有这个权重）
+        # 用户传 yolo11s.pt 等 → 保持不变
+        if "-seg" in model_name.lower():
+            # 自动去掉 -seg 后缀，转为检测模型
+            base = model_name.lower().replace("-seg", "").replace(".pt", "")
+            # 优先使用项目根目录已有的 .pt（如 yolo26n.pt）
+            local_pt = Path(__file__).parent.parent / f"{base}.pt"
+            if local_pt.exists():
+                model_name = str(local_pt)
+            else:
+                # fallback 使用 ultralytics 标准命名（自动下载）
+                model_name = f"{base}.pt"
+            print(f"[task_type=det] 自动切换检测模型: {model_name}")
 
     # ---- 加载预训练模型 ----
     model = YOLO(model_name)

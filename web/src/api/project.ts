@@ -11,6 +11,7 @@ export interface Project {
   id: number
   name: string
   description: string | null
+  task_type: 'seg' | 'det'
   resize_h: number
   resize_w: number
   crop_size: number
@@ -33,6 +34,7 @@ export interface ProjectStats extends Project {
 export interface ProjectCreate {
   name: string
   description?: string
+  task_type?: 'seg' | 'det'
   resize_h?: number
   resize_w?: number
   crop_size?: number

@@ -179,6 +179,246 @@ def build_dataset_from_db(
     return stats
 
 
+def build_detection_dataset_from_db(
+    project_id: int,
+    output_dir: str,
+    db: Session,
+    only_reviewed: bool = False,
+) -> dict:
+    """
+    目标检测数据集构建：将 polygon (4点矩形) → YOLO det txt (class cx cy w h)
+
+    输出结构：
+        output_dir/
+        ├── images/   # 原始图像（复制）
+        └── labels/   # YOLO det txt（每行: class_id cx cy w h，归一化）
+
+    Args:
+        project_id: 项目ID
+        output_dir: 输出目录
+        db: 数据库 Session
+        only_reviewed: 是否仅使用已审核的图像
+
+    Returns:
+        统计信息字典
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ValueError(f"项目不存在: {project_id}")
+
+    # 类别映射
+    class_map = {}
+    classes = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
+    for dc in classes:
+        class_map[dc.id] = dc.class_index
+    class_names = [dc.name for dc in sorted(classes, key=lambda x: x.class_index)]
+
+    # 查询图像
+    status_filter = ["labeled", "reviewed"] if not only_reviewed else ["reviewed"]
+    images_q = (
+        db.query(Image)
+        .filter(Image.project_id == project_id, Image.status.in_(status_filter))
+        .all()
+    )
+
+    if not images_q:
+        raise ValueError("没有可用的已标注图像")
+
+    out_dir = Path(output_dir)
+    img_out = out_dir / "images"
+    lbl_out = out_dir / "labels"
+    img_out.mkdir(parents=True, exist_ok=True)
+    lbl_out.mkdir(parents=True, exist_ok=True)
+
+    stats = {
+        "total_images": len(images_q),
+        "labeled_images": 0,
+        "background_images": 0,
+        "total_annotations": 0,
+        "class_names": class_names,
+        "class_distribution": {},
+    }
+
+    for image in images_q:
+        # 源图路径
+        fp = Path(image.file_path)
+        if fp.is_absolute() and fp.exists():
+            src_path = fp
+        else:
+            src_path = settings.upload_path / image.file_path
+        if not src_path.exists():
+            continue
+
+        # 用 image.id 作为 stem 保证唯一
+        stem = f"{image.id:06d}"
+        # 保留原始扩展名（YOLO 支持 .bmp/.png/.jpg）
+        ext = src_path.suffix.lower()
+        if ext not in {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}:
+            ext = '.png'
+        dst_img = img_out / f"{stem}{ext}"
+        shutil.copy2(str(src_path), str(dst_img))
+
+        # 读取标注
+        annotations = (
+            db.query(Annotation)
+            .filter(Annotation.image_id == image.id)
+            .all()
+        )
+
+        img_w = image.width or 1
+        img_h = image.height or 1
+
+        lines = []
+        for ann in annotations:
+            cls_index = class_map.get(ann.class_id)
+            if cls_index is None:
+                continue
+
+            # 优先用 bbox 字段（更准），否则从 polygon 推算
+            x1 = y1 = x2 = y2 = None
+            if ann.bbox and isinstance(ann.bbox, dict):
+                try:
+                    x1 = float(ann.bbox.get("x1"))
+                    y1 = float(ann.bbox.get("y1"))
+                    x2 = float(ann.bbox.get("x2"))
+                    y2 = float(ann.bbox.get("y2"))
+                except (TypeError, ValueError):
+                    x1 = y1 = x2 = y2 = None
+
+            if x1 is None and ann.polygon:
+                xs, ys = [], []
+                for p in ann.polygon:
+                    if isinstance(p, dict):
+                        xs.append(float(p['x']))
+                        ys.append(float(p['y']))
+                    else:
+                        xs.append(float(p[0]))
+                        ys.append(float(p[1]))
+                if xs and ys:
+                    x1, y1 = min(xs), min(ys)
+                    x2, y2 = max(xs), max(ys)
+
+            if x1 is None:
+                continue
+
+            # 自动判断坐标空间：>1 像素，否则归一化
+            if max(x1, y1, x2, y2) > 1.0:
+                x1 /= img_w
+                y1 /= img_h
+                x2 /= img_w
+                y2 /= img_h
+
+            # clamp [0, 1]
+            x1 = max(0.0, min(1.0, x1))
+            y1 = max(0.0, min(1.0, y1))
+            x2 = max(0.0, min(1.0, x2))
+            y2 = max(0.0, min(1.0, y2))
+
+            bw = x2 - x1
+            bh = y2 - y1
+            if bw <= 0 or bh <= 0:
+                continue
+            cx = x1 + bw / 2.0
+            cy = y1 + bh / 2.0
+
+            lines.append(f"{cls_index} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+
+            stats["class_distribution"][cls_index] = \
+                stats["class_distribution"].get(cls_index, 0) + 1
+            stats["total_annotations"] += 1
+
+        lbl_path = lbl_out / f"{stem}.txt"
+        lbl_path.write_text("\n".join(lines) + ("\n" if lines else ""))
+
+        if lines:
+            stats["labeled_images"] += 1
+        else:
+            stats["background_images"] += 1
+
+    return stats
+
+
+def prepare_detection_dataset(
+    project_id: int,
+    task_output_dir: str,
+    db: Session,
+    train_ratio: float = 0.85,
+    seed: int = 42,
+    progress_callback=None,
+) -> dict:
+    """
+    目标检测数据集准备流程（不滑窗）：
+        1. build_detection_dataset_from_db() → 原图 + YOLO det txt
+        2. 按 train_ratio 划分 train/val
+        3. 复制到 dataset/images/{train,val} + dataset/labels/{train,val}
+    """
+    import random
+
+    task_dir = Path(task_output_dir)
+
+    # ---- 阶段 1: 从数据库导出 ----
+    if progress_callback:
+        progress_callback(0, 2, "从数据库导出标注数据...")
+
+    raw_dir = str(task_dir / "raw")
+    export_stats = build_detection_dataset_from_db(project_id, raw_dir, db)
+    class_names = export_stats["class_names"]
+
+    raw_path = Path(raw_dir)
+    img_files = sorted((raw_path / "images").iterdir())
+    if not img_files:
+        raise ValueError("数据集为空")
+
+    # 只保留有对应 label 的图（label 文件总是会被写出，但要保证图存在）
+    valid = []
+    for f in img_files:
+        if f.is_file():
+            valid.append(f)
+
+    # ---- 阶段 2: 划分 train/val ----
+    if progress_callback:
+        progress_callback(1, 2, "划分训练集 / 验证集...")
+
+    random.seed(seed)
+    indices = list(range(len(valid)))
+    random.shuffle(indices)
+    split_idx = max(1, int(len(indices) * train_ratio))
+    train_set = set(indices[:split_idx])
+
+    dataset_dir = task_dir / "dataset"
+    for split in ("train", "val"):
+        (dataset_dir / "images" / split).mkdir(parents=True, exist_ok=True)
+        (dataset_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
+
+    train_count = 0
+    val_count = 0
+    for i, img_path in enumerate(valid):
+        split = "train" if i in train_set else "val"
+        if split == "train":
+            train_count += 1
+        else:
+            val_count += 1
+        # 复制图
+        shutil.copy2(str(img_path), str(dataset_dir / "images" / split / img_path.name))
+        # 复制 label（同名 .txt）
+        lbl_src = raw_path / "labels" / f"{img_path.stem}.txt"
+        if lbl_src.exists():
+            shutil.copy2(str(lbl_src), str(dataset_dir / "labels" / split / f"{img_path.stem}.txt"))
+        else:
+            # 缺标注，写空文件（背景）
+            (dataset_dir / "labels" / split / f"{img_path.stem}.txt").touch()
+
+    if progress_callback:
+        progress_callback(2, 2, "数据集准备完成")
+
+    return {
+        "dataset_dir": str(dataset_dir),
+        "class_names": class_names,
+        "export_stats": export_stats,
+        "split_stats": {"train": train_count, "val": val_count, "total": len(valid)},
+    }
+
+
 def prepare_full_dataset(
     project_id: int,
     task_output_dir: str,

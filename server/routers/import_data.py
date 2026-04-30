@@ -230,3 +230,218 @@ async def import_project(
         "project_name": project.name,
         "stats": stats,
     }
+
+
+# ===========================================================
+# 目标检测（Object Detection）VOC XML 导入
+# ===========================================================
+
+@router.post("/voc-scan")
+async def scan_voc_classes_api(files: List[UploadFile] = File(...)):
+    """
+    上传 Pascal VOC 格式 XML 文件，扫描所有类别名 + bbox 数。
+    返回 {类别名: bbox 总数}
+    """
+    import tempfile
+    tmp_dir = Path(tempfile.mkdtemp())
+    try:
+        for f in files:
+            if f.filename and f.filename.lower().endswith('.xml'):
+                content = await f.read()
+                (tmp_dir / f.filename).write_bytes(content)
+
+        from ..services.import_service import scan_xml_classes
+        class_counts = scan_xml_classes(str(tmp_dir))
+        return {"classes": class_counts}
+    finally:
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+
+
+@router.post("/voc-run")
+async def import_voc_project(
+    project_name: str = Form(...),
+    description: str = Form(default=""),
+    crop_size: int = Form(default=640),
+    class_mapping_json: str = Form(...),  # JSON: {"panel": {"class_index": 0, "color": "#FF0000"}}
+    images: List[UploadFile] = File(...),
+    xmls: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    执行目标检测项目导入：创建项目 (task_type='det') + 导入图片 + 转换 VOC bbox → 4点多边形
+
+    class_mapping_json 格式（key 是类别名，不是像素值）：
+    {
+        "panel": {"class_index": 0, "color": "#FF0000"},
+        "defect": {"class_index": 1, "color": "#00FF00"}
+    }
+    """
+    # 解析类别映射
+    try:
+        class_mapping_raw = json.loads(class_mapping_json)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="class_mapping_json 格式错误")
+
+    if not class_mapping_raw:
+        raise HTTPException(status_code=400, detail="至少需要一个类别映射")
+
+    # name → class_index, name → color
+    name_to_index = {}
+    class_defs = {}  # class_index → {name, color}
+    for cls_name, info in class_mapping_raw.items():
+        try:
+            ci = int(info["class_index"])
+        except (KeyError, ValueError, TypeError):
+            raise HTTPException(status_code=400, detail=f"类别 {cls_name} 缺少 class_index")
+        name_to_index[cls_name] = ci
+        class_defs[ci] = {"name": cls_name, "color": info.get("color", "#FF0000")}
+
+    # 1. 创建项目（task_type='det'）
+    project = Project(
+        name=project_name,
+        description=description or "目标检测项目",
+        task_type="det",
+        resize_h=crop_size,  # 检测项目不滑窗，resize=crop_size
+        resize_w=crop_size,
+        crop_size=crop_size,
+        overlap=0.0,
+    )
+    db.add(project)
+    db.flush()
+
+    # 2. 创建类别
+    class_index_to_id = {}
+    for ci, info in sorted(class_defs.items()):
+        dc = DefectClass(
+            project_id=project.id,
+            class_index=ci,
+            name=info["name"],
+            color=info["color"],
+        )
+        db.add(dc)
+        db.flush()
+        class_index_to_id[ci] = dc.id
+
+    # 3. 保存图片，处理 XML
+    upload_dir = settings.upload_path / str(project.id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # 建立 XML 索引（stem → UploadFile）
+    xml_map = {}
+    for xf in xmls:
+        if xf.filename and xf.filename.lower().endswith('.xml'):
+            stem = Path(xf.filename).stem
+            xml_map[stem] = xf
+
+    from ..services.import_service import parse_voc_xml, bbox_to_polygon4
+
+    stats = {"total": 0, "with_ann": 0, "total_boxes": 0, "skipped_no_xml": 0,
+             "skipped_unknown_class": 0, "skipped_image_decode": 0}
+
+    import tempfile
+
+    for img_file in images:
+        if not img_file.filename:
+            continue
+        ext = Path(img_file.filename).suffix.lower()
+        if ext not in SUPPORTED_IMG_EXTS:
+            continue
+
+        stats["total"] += 1
+        stem = Path(img_file.filename).stem
+
+        # 保存原图
+        img_content = await img_file.read()
+        saved_name = f"{uuid.uuid4().hex[:8]}_{img_file.filename}"
+        img_saved_path = upload_dir / saved_name
+        img_saved_path.write_bytes(img_content)
+
+        # 获取图像尺寸
+        import cv2, numpy as np
+        img_array = cv2.imdecode(np.frombuffer(img_content, np.uint8), cv2.IMREAD_UNCHANGED)
+        if img_array is None:
+            stats["skipped_image_decode"] += 1
+            img_saved_path.unlink(missing_ok=True)
+            continue
+        h, w = img_array.shape[:2]
+
+        # 创建 Image 记录
+        rel_path = f"{project.id}/{saved_name}"
+        image = Image(
+            project_id=project.id,
+            filename=img_file.filename,
+            file_path=rel_path,
+            width=w, height=h,
+            status="unlabeled",
+        )
+        db.add(image)
+        db.flush()
+
+        # 查找对应 XML
+        xml_file = xml_map.get(stem)
+        if not xml_file:
+            stats["skipped_no_xml"] += 1
+            continue
+
+        # 解析 XML
+        xml_content = await xml_file.read()
+        await xml_file.seek(0)
+        tmp_xml = Path(tempfile.mktemp(suffix='.xml'))
+        tmp_xml.write_bytes(xml_content)
+
+        try:
+            voc = parse_voc_xml(str(tmp_xml))
+            xml_w = voc["width"] or w
+            xml_h = voc["height"] or h
+
+            box_count = 0
+            for obj in voc["objects"]:
+                cls_name = obj["name"]
+                if cls_name not in name_to_index:
+                    stats["skipped_unknown_class"] += 1
+                    continue
+
+                ci = name_to_index[cls_name]
+                # 用 XML 中的 size 做归一化
+                polygon = bbox_to_polygon4(
+                    obj["xmin"], obj["ymin"], obj["xmax"], obj["ymax"],
+                    xml_w, xml_h,
+                )
+                if not polygon:
+                    continue
+
+                # bbox 字段（归一化 0~1，便于查询）
+                bbox = {
+                    "x1": round(obj["xmin"] / xml_w, 6),
+                    "y1": round(obj["ymin"] / xml_h, 6),
+                    "x2": round(obj["xmax"] / xml_w, 6),
+                    "y2": round(obj["ymax"] / xml_h, 6),
+                }
+                # area 用像素面积
+                area = (obj["xmax"] - obj["xmin"]) * (obj["ymax"] - obj["ymin"])
+
+                ann = Annotation(
+                    image_id=image.id,
+                    class_id=class_index_to_id[ci],
+                    polygon=polygon,
+                    bbox=bbox,
+                    area=area,
+                )
+                db.add(ann)
+                box_count += 1
+                stats["total_boxes"] += 1
+
+            if box_count > 0:
+                image.status = "labeled"
+                stats["with_ann"] += 1
+        finally:
+            tmp_xml.unlink(missing_ok=True)
+
+    db.commit()
+
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "task_type": "det",
+        "stats": stats,
+    }

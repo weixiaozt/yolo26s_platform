@@ -31,6 +31,7 @@ def create_project(body: ProjectCreate, db: Session = Depends(get_db)):
     project = Project(
         name=body.name,
         description=body.description,
+        task_type=body.task_type,
         resize_h=body.resize_h,
         resize_w=body.resize_w,
         crop_size=body.crop_size,

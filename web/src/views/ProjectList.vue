@@ -40,6 +40,9 @@
         </template>
         <p class="project-desc">{{ p.description || '暂无描述' }}</p>
         <div class="project-meta">
+          <el-tag :type="(p.task_type || 'seg') === 'det' ? 'warning' : 'success'" size="small" effect="plain">
+            {{ (p.task_type || 'seg') === 'det' ? '目标检测' : '实例分割' }}
+          </el-tag>
           <span>
             <el-icon><Picture /></el-icon>
             {{ p.resize_h }}×{{ p.resize_w }} → {{ p.crop_size }}
@@ -91,12 +94,22 @@
         <el-form-item label="项目名称" required>
           <el-input v-model="form.name" placeholder="如：硅片裂纹检测-批次A" />
         </el-form-item>
+        <el-form-item label="任务类型" required>
+          <el-radio-group v-model="form.task_type">
+            <el-radio-button label="seg">实例分割（Seg）</el-radio-button>
+            <el-radio-button label="det">目标检测（Det）</el-radio-button>
+          </el-radio-group>
+          <div class="hint" style="margin-top:4px">
+            <span v-if="form.task_type === 'seg'">分割：标注多边形区域，输出像素级 Mask</span>
+            <span v-else>检测：标注矩形框，仅输出 bbox（适合小图、规整目标）</span>
+          </div>
+        </el-form-item>
         <el-form-item label="项目描述">
           <el-input v-model="form.description" type="textarea" :rows="2" />
         </el-form-item>
 
         <el-divider content-position="left">预处理参数</el-divider>
-        <el-row :gutter="16">
+        <el-row :gutter="16" v-if="form.task_type === 'seg'">
           <el-col :span="12">
             <el-form-item label="Resize 高度">
               <el-input-number v-model="form.resize_h" :min="640" :max="8192" :step="64" style="width:100%" />
@@ -110,11 +123,11 @@
         </el-row>
         <el-row :gutter="16">
           <el-col :span="12">
-            <el-form-item label="切割尺寸">
+            <el-form-item :label="form.task_type === 'det' ? '训练图尺寸' : '切割尺寸'">
               <el-input-number v-model="form.crop_size" :min="320" :max="8192" :step="32" style="width:100%" />
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :span="12" v-if="form.task_type === 'seg'">
             <el-form-item label="重叠率">
               <el-input-number v-model="form.overlap" :min="0" :max="0.5" :step="0.05" :precision="2" style="width:100%" />
             </el-form-item>
@@ -164,6 +177,7 @@ const defaultColors = ['#FF4444', '#44BB44', '#4488FF', '#FFAA00', '#FF44FF', '#
 const form = ref<ProjectCreate>({
   name: '',
   description: '',
+  task_type: 'seg',
   resize_h: 4096,
   resize_w: 4096,
   crop_size: 640,
@@ -186,7 +200,7 @@ function addClass() {
 
 function resetForm() {
   form.value = {
-    name: '', description: '',
+    name: '', description: '', task_type: 'seg',
     resize_h: 4096, resize_w: 4096, crop_size: 640, overlap: 0.2,
     class_names: [
       { class_index: 0, name: 'defect_1', color: '#FF4444' },
@@ -342,4 +356,5 @@ onMounted(loadProjects)
   gap: 10px;
   margin-bottom: 8px;
 }
+.hint { font-size: 12px; color: #909399; }
 </style>

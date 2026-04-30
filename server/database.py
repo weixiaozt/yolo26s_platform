@@ -39,10 +39,19 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
     # 自动添加新字段（开发阶段简易迁移）
-    with engine.connect() as conn:
-        try:
-            conn.execute(text("ALTER TABLE images ADD COLUMN mask_path VARCHAR(500) NULL"))
-            conn.commit()
-            print("[迁移] 已添加 images.mask_path 字段")
-        except Exception:
-            conn.rollback()  # 字段已存在，忽略
+    migrations = [
+        ("ALTER TABLE images ADD COLUMN mask_path VARCHAR(500) NULL", "images.mask_path"),
+        (
+            "ALTER TABLE projects ADD COLUMN task_type ENUM('seg','det') NOT NULL DEFAULT 'seg' "
+            "COMMENT '任务类型: seg=分割, det=目标检测'",
+            "projects.task_type",
+        ),
+    ]
+    for sql, label in migrations:
+        with engine.connect() as conn:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                print(f"[迁移] 已添加 {label} 字段")
+            except Exception:
+                conn.rollback()  # 字段已存在，忽略

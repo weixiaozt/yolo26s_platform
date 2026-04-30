@@ -65,11 +65,19 @@
             </el-form-item>
             <el-form-item label="模型尺寸">
               <el-select v-model="c.model_name" style="width:100%">
-                <el-option label="Nano  — 最快，~3M 参数，适合快速验证" value="yolo26n-seg" />
-                <el-option label="Small — 均衡，~24M 参数（推荐）" value="yolo26s-seg" />
-                <el-option label="Medium — 更精准，~40M 参数" value="yolo26m-seg" />
-                <el-option label="Large — 高精度，~63M 参数" value="yolo26l-seg" />
-                <el-option label="XLarge — 最精准，~97M 参数" value="yolo26x-seg" />
+                <template v-if="taskType === 'det'">
+                  <el-option label="Nano  — 最快，~3M 参数（推荐小数据）" value="yolo26n.pt" />
+                  <el-option label="Small — 均衡，~22M 参数" value="yolo26s.pt" />
+                  <el-option label="Medium — 更精准，~38M 参数" value="yolo26m.pt" />
+                  <el-option label="Large — 高精度，~58M 参数" value="yolo26l.pt" />
+                </template>
+                <template v-else>
+                  <el-option label="Nano  — 最快，~3M 参数，适合快速验证" value="yolo26n-seg" />
+                  <el-option label="Small — 均衡，~24M 参数（推荐）" value="yolo26s-seg" />
+                  <el-option label="Medium — 更精准，~40M 参数" value="yolo26m-seg" />
+                  <el-option label="Large — 高精度，~63M 参数" value="yolo26l-seg" />
+                  <el-option label="XLarge — 最精准，~97M 参数" value="yolo26x-seg" />
+                </template>
               </el-select>
               <span class="hint">模型越大精度越高，但速度越慢、显存占用越大</span>
             </el-form-item>
@@ -269,6 +277,7 @@ const resumeTaskId = ref<number|null>(null)
 const resumeModelType = ref('best')
 const completedTasks = ref<any[]>([])
 const currentClassCount = ref(0)
+const taskType = ref<'seg'|'det'>('seg')
 
 const classCountWarning = computed(() => {
   if (trainMode.value !== 'finetune' || !resumeTaskId.value) return ''
@@ -283,10 +292,17 @@ const classCountWarning = computed(() => {
 })
 
 onMounted(async () => {
-  // 加载项目类别数
+  // 加载项目类别数和任务类型
   try {
     const { data: proj } = await api.get(`/projects/${props.id}`)
     currentClassCount.value = proj.defect_classes?.length || 0
+    taskType.value = (proj.task_type || 'seg') as 'seg' | 'det'
+    // 检测项目使用不同的默认模型和参数
+    if (taskType.value === 'det') {
+      c.value.model_name = 'yolo26n.pt'  // 检测默认 nano
+      c.value.use_morphology = false       // 检测不需要形态学
+      c.value.train_ratio = 0.85
+    }
   } catch {}
   // 加载已完成的训练任务
   try {

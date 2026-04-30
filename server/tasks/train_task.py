@@ -19,7 +19,8 @@ if _project_root not in sys.path:
 from . import celery_app
 from ..database import SessionLocal
 from ..models.train_task import TrainTask, TrainEpochLog
-from ..services.dataset_service import prepare_full_dataset
+from ..models.project import Project
+from ..services.dataset_service import prepare_full_dataset, prepare_detection_dataset
 from ..config import settings
 
 
@@ -44,6 +45,11 @@ def run_training_pipeline(self, task_id: int):
         config = task.config or {}
         project_id = task.project_id
 
+        # 读取项目任务类型
+        project = db.query(Project).filter(Project.id == project_id).first()
+        task_type = (project.task_type if project else "seg") or "seg"
+        config["task_type"] = task_type
+
         # 更新状态
         task.status = "preparing"
         task.started_at = datetime.now()
@@ -55,23 +61,31 @@ def run_training_pipeline(self, task_id: int):
         task.output_dir = str(task_dir)
         db.commit()
 
-        # ---- 阶段 1~3: 数据集准备 ----
-        dataset_result = prepare_full_dataset(
-            project_id=project_id,
-            task_output_dir=str(task_dir),
-            db=db,
-            target_h=config.get("resize_h", 2048),
-            target_w=config.get("resize_w", 2048),
-            crop_size=config.get("crop_size", 640),
-            overlap=config.get("overlap", 0.2),
-            train_ratio=config.get("train_ratio", 0.8),
-            oversample_factor=config.get("oversample_factor", 5),
-            bg_keep_ratio=0,
-            use_morphology=config.get("use_morphology", True),
-            dilate_kernel=config.get("dilate_kernel", 3),
-            erode_kernel=config.get("erode_kernel", 3),
-            mask_dilate_kernel=config.get("mask_dilate_kernel", 0),
-        )
+        # ---- 阶段 1~3: 数据集准备（按任务类型分支）----
+        if task_type == "det":
+            dataset_result = prepare_detection_dataset(
+                project_id=project_id,
+                task_output_dir=str(task_dir),
+                db=db,
+                train_ratio=config.get("train_ratio", 0.85),
+            )
+        else:
+            dataset_result = prepare_full_dataset(
+                project_id=project_id,
+                task_output_dir=str(task_dir),
+                db=db,
+                target_h=config.get("resize_h", 2048),
+                target_w=config.get("resize_w", 2048),
+                crop_size=config.get("crop_size", 640),
+                overlap=config.get("overlap", 0.2),
+                train_ratio=config.get("train_ratio", 0.8),
+                oversample_factor=config.get("oversample_factor", 5),
+                bg_keep_ratio=0,
+                use_morphology=config.get("use_morphology", True),
+                dilate_kernel=config.get("dilate_kernel", 3),
+                erode_kernel=config.get("erode_kernel", 3),
+                mask_dilate_kernel=config.get("mask_dilate_kernel", 0),
+            )
 
         dataset_dir = dataset_result["dataset_dir"]
         class_names = dataset_result["class_names"]
@@ -187,6 +201,7 @@ def run_training_pipeline(self, task_id: int):
             batch_size=config.get("batch_size", 16),
             patience=config.get("patience", 0),
             device=config.get("device", "0"),
+            task_type=task_type,
             augment_hsv_h=config.get("hsv_h", 0.015),
             augment_hsv_s=config.get("hsv_s", 0.7),
             augment_hsv_v=config.get("hsv_v", 0.4),
