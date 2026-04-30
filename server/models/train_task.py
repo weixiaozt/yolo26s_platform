@@ -30,7 +30,14 @@ class TrainTask(Base):
     # 进度
     epochs: Mapped[int] = mapped_column(Integer, default=0)
     current_epoch: Mapped[int] = mapped_column(Integer, default=0)
-    best_map50: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_map50: Mapped[float | None] = mapped_column(
+        Float, nullable=True,
+        comment="best.pt 对应 epoch 的 mAP50（与 fitness 同步）",
+    )
+    best_fitness: Mapped[float | None] = mapped_column(
+        Float, nullable=True,
+        comment="Ultralytics fitness 历史最佳 (0.1·mAP50 + 0.9·mAP50:95)",
+    )
 
     # 模型路径
     best_model_path: Mapped[str | None] = mapped_column(String(500), nullable=True)

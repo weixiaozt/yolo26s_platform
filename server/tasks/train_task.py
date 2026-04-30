@@ -153,12 +153,26 @@ def run_training_pipeline(self, task_id: int):
         def epoch_callback(data: dict):
             """
             每个 epoch 结束后的回调。
-            写入 train_epoch_logs 表，更新 train_tasks 进度。
+            写入/更新 train_epoch_logs 表，更新 train_tasks 进度。
+
+            关键点：
+            1. **upsert**：Ultralytics 训练结束后会用 best.pt 再做一次 final val，
+               触发回调时 trainer.epoch 仍是最后一个 epoch 编号。
+               用 (task_id, epoch) 做 upsert，避免同一个 epoch 写两条记录。
+            2. **best 跟 fitness 走**：Ultralytics 用 fitness 选 best.pt，
+               不是用单纯 mAP50。我们以 trainer.best_fitness 的增量为准
+               同步更新 best_map50，确保界面显示的 best_map50 与 best.pt 实际指标一致。
             """
             try:
-                epoch_log = TrainEpochLog(
-                    task_id=task_id,
-                    epoch=data.get("epoch", 0),
+                ep = data.get("epoch", 0)
+
+                # ---- upsert epoch 日志 ----
+                existing = (
+                    db.query(TrainEpochLog)
+                    .filter(TrainEpochLog.task_id == task_id, TrainEpochLog.epoch == ep)
+                    .first()
+                )
+                fields = dict(
                     train_box_loss=data.get("train_box_loss"),
                     train_seg_loss=data.get("train_seg_loss"),
                     train_cls_loss=data.get("train_cls_loss"),
@@ -175,15 +189,28 @@ def run_training_pipeline(self, task_id: int):
                     map50_95_m=data.get("mAP50_95_M"),
                     lr=data.get("lr"),
                 )
-                db.add(epoch_log)
+                if existing is not None:
+                    # 已存在则覆盖（final val 会触发同 epoch 的二次回调，用最新值覆盖）
+                    for k, v in fields.items():
+                        setattr(existing, k, v)
+                else:
+                    db.add(TrainEpochLog(task_id=task_id, epoch=ep, **fields))
 
-                # 更新任务进度
+                # ---- 更新任务进度 + best 指标 ----
                 task_obj = db.query(TrainTask).filter(TrainTask.id == task_id).first()
                 if task_obj:
-                    task_obj.current_epoch = data.get("epoch", 0) + 1
-                    map50 = data.get("mAP50_B", 0)
-                    if task_obj.best_map50 is None or map50 > task_obj.best_map50:
-                        task_obj.best_map50 = map50
+                    task_obj.current_epoch = ep + 1
+
+                    # trainer.best_fitness 由 core/train.py 透传过来，
+                    # 是 Ultralytics 内部维护的"包括当前 epoch 的"历史最佳。
+                    # 当它增加时，说明当前 epoch 是新最佳，对应的就是 best.pt 的权重。
+                    new_best_fit = data.get("best_fitness", 0) or 0
+                    prev_best_fit = task_obj.best_fitness or 0
+                    if new_best_fit > prev_best_fit:
+                        task_obj.best_fitness = new_best_fit
+                        # 同步更新 best_map50（与 best.pt 对应的 epoch 一致）
+                        cur_map50 = data.get("mAP50_B", 0) or 0
+                        task_obj.best_map50 = cur_map50
 
                 db.commit()
             except Exception as e:

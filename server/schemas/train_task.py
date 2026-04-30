@@ -72,6 +72,7 @@ class TrainTaskOut(BaseModel):
     epochs: int
     current_epoch: int
     best_map50: Optional[float]
+    best_fitness: Optional[float] = None
     best_model_path: Optional[str]
     last_model_path: Optional[str]
     output_dir: Optional[str]

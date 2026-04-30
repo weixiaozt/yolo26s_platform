@@ -46,6 +46,11 @@ def init_db():
             "COMMENT '任务类型: seg=分割, det=目标检测'",
             "projects.task_type",
         ),
+        (
+            "ALTER TABLE train_tasks ADD COLUMN best_fitness FLOAT NULL "
+            "COMMENT 'Ultralytics fitness 最佳值（与 best.pt 同步）'",
+            "train_tasks.best_fitness",
+        ),
     ]
     for sql, label in migrations:
         with engine.connect() as conn:
