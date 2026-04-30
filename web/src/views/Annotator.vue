@@ -383,6 +383,8 @@ function initCanvas(){
 
 function onToolChange(){
   cancelDrawing()
+  // 重建 polygon 让 selectable 状态切换（select 工具可拖整体，其他工具不可）
+  renderAnnotations()
   // 仅在 select 工具下显示顶点 handle，其他工具关掉避免事件冲突
   if(currentTool.value==='select'){
     if(selectedAnnIdx.value>=0) showVertexHandles(selectedAnnIdx.value)
@@ -418,11 +420,64 @@ function renderAnnotations(){
   if(!canvas||!currentImage.value)return
   canvas.getObjects().filter(o=>(o as any)._ann).forEach(o=>canvas!.remove(o))
   const W=currentImage.value.width,H=currentImage.value.height
+  // select 工具下让 polygon 可拖动整体平移（其他工具下保持 evented=true 用于点击选中，但禁拖）
+  const isSelectTool=currentTool.value==='select'
   annotations.value.forEach((ann,idx)=>{
     const c=clsColor(ann.class_id)
     const pts=ann.polygon.map(p=>({x:p.x*W,y:p.y*H}))
-    const poly=new fabric.Polygon(pts,{fill:c+'55',stroke:c,strokeWidth:1.5,selectable:false,objectCaching:false})
-    ;(poly as any)._ann=true;(poly as any)._idx=idx;canvas!.add(poly)
+    const poly=new fabric.Polygon(pts,{
+      fill:c+'55',stroke:c,strokeWidth:1.5,
+      selectable:isSelectTool,
+      hasControls:false,hasBorders:false,
+      lockRotation:true,lockScalingX:true,lockScalingY:true,
+      hoverCursor:isSelectTool?'move':'default',
+      objectCaching:false,
+    })
+    ;(poly as any)._ann=true
+    ;(poly as any)._idx=idx
+    // 整体拖动：mousedown 记录原点，moving 同步 handles，modified 应用偏移到数据
+    let dragOrigin:{left:number,top:number}|null=null
+    poly.on('mousedown',()=>{
+      if(currentTool.value!=='select')return
+      dragOrigin={left:poly.left||0,top:poly.top||0}
+    })
+    poly.on('moving',()=>{
+      if(!dragOrigin||!currentImage.value)return
+      const dx=(poly.left||0)-dragOrigin.left
+      const dy=(poly.top||0)-dragOrigin.top
+      // 实时同步顶点 handles 跟随
+      const W2=currentImage.value.width,H2=currentImage.value.height
+      const ann_=annotations.value[idx]
+      if(!ann_)return
+      editHandles.forEach((h,i)=>{
+        const pt=ann_.polygon[i]
+        if(!pt)return
+        h.set({left:pt.x*W2+dx-6,top:pt.y*H2+dy-6})
+        h.setCoords()
+      })
+      canvas!.requestRenderAll()
+    })
+    poly.on('modified',()=>{
+      if(!dragOrigin||!currentImage.value)return
+      const dx=(poly.left||0)-dragOrigin.left
+      const dy=(poly.top||0)-dragOrigin.top
+      dragOrigin=null
+      // 阈值过滤：< 0.5px 视为没动（避免单击也触发 dirty）
+      if(Math.abs(dx)<0.5&&Math.abs(dy)<0.5)return
+      pushUndo()
+      const W2=currentImage.value.width,H2=currentImage.value.height
+      annotations.value[idx].polygon=annotations.value[idx].polygon.map(p=>({
+        x:Math.max(0,Math.min(1,p.x+dx/W2)),
+        y:Math.max(0,Math.min(1,p.y+dy/H2)),
+      }))
+      dirty.value=true
+      scheduleAutoSave()
+      // 重建 polygon（让 fabric 的 left/top 复位）+ 重建 handles
+      renderAnnotations()
+      if(selectedAnnIdx.value===idx) showVertexHandles(idx)
+      highlightSelected()
+    })
+    canvas!.add(poly)
   })
   canvas.requestRenderAll()
 }
