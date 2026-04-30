@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -21,6 +21,7 @@ from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats, DefectClassCreate, DefectClassOut,
 )
 from ..services.project_package import export_project_to_zip, import_project_from_zip
+from ..services.project_convert import convert_project_task_type
 
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
 
@@ -182,6 +183,35 @@ async def import_package(file: UploadFile = File(...), db: Session = Depends(get
         raise HTTPException(status_code=500, detail=f"导入失败: {e}\n{traceback.format_exc()}")
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+@router.post("/{project_id}/convert-task-type")
+def convert_task_type(
+    project_id: int,
+    target_type: str = Form(..., description="目标类型: seg / det"),
+    mode: str = Form(default="copy", description="inplace=原地 / copy=复制为新项目"),
+    new_name: str = Form(default="", description="复制模式下的新项目名"),
+    db: Session = Depends(get_db),
+):
+    """
+    转换项目任务类型（seg ↔ det）。
+    标注数据本身不需要修改 —— 平台标注统一以 polygon 存储，
+    det 模式下是 4 点矩形，对 seg 训练同样合法。
+    """
+    try:
+        result = convert_project_task_type(
+            project_id=project_id,
+            target_type=target_type,
+            mode=mode,
+            db=db,
+            new_name=new_name or None,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"转换失败: {e}\n{traceback.format_exc()}")
 
 
 @router.post("/{project_id}/classes", response_model=DefectClassOut, status_code=201)

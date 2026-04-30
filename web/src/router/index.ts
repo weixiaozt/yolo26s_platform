@@ -20,6 +20,11 @@ const router = createRouter({
       component: () => import('../views/ImportProject.vue'),
     },
     {
+      path: '/annotation-convert',
+      name: 'AnnotationConvert',
+      component: () => import('../views/AnnotationConvert.vue'),
+    },
+    {
       path: '/users',
       name: 'UserManage',
       component: () => import('../views/UserManage.vue'),
