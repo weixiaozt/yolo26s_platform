@@ -249,24 +249,26 @@ def run_train(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- 任务类型自动适配 ----
-    # task_type='det' 时：
-    #   - 默认模型若未指定 -seg，自动使用检测版（去掉 -seg 后缀）
-    #   - close_mosaic 在小数据集下行为一致
     is_det = (task_type == "det")
+    is_cls = (task_type == "cls")
+
     if is_det:
-        # 用户传 yolo26s-seg → 自动改 yolo26n.pt（项目里有这个权重）
-        # 用户传 yolo11s.pt 等 → 保持不变
+        # 用户传 yolo26s-seg → 自动改 yolo26s.pt（detect）
         if "-seg" in model_name.lower():
-            # 自动去掉 -seg 后缀，转为检测模型
             base = model_name.lower().replace("-seg", "").replace(".pt", "")
-            # 优先使用项目根目录已有的 .pt（如 yolo26n.pt）
             local_pt = Path(__file__).parent.parent / f"{base}.pt"
             if local_pt.exists():
                 model_name = str(local_pt)
             else:
-                # fallback 使用 ultralytics 标准命名（自动下载）
                 model_name = f"{base}.pt"
             print(f"[task_type=det] 自动切换检测模型: {model_name}")
+    elif is_cls:
+        # 分类必须用 -cls 后缀模型
+        if "-cls" not in model_name.lower():
+            # 用户传 yolo11s.pt → yolo11s-cls.pt
+            base = model_name.lower().replace("-seg", "").replace(".pt", "")
+            model_name = f"{base}-cls.pt"
+            print(f"[task_type=cls] 自动切换分类模型: {model_name}")
 
     # ---- 加载预训练模型 ----
     model = YOLO(model_name)
@@ -385,6 +387,9 @@ def run_train(
                 'metrics/recall(M)': 'recall_M',
                 'metrics/mAP50(M)': 'mAP50_M',
                 'metrics/mAP50-95(M)': 'mAP50_95_M',
+                # 分类指标
+                'metrics/accuracy_top1': 'top1_acc',
+                'metrics/accuracy_top5': 'top5_acc',
             }
             for src_key, dst_key in metric_mapping.items():
                 data[dst_key] = float(metrics.get(src_key, 0.0))

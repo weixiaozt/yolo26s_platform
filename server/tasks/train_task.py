@@ -20,7 +20,9 @@ from . import celery_app
 from ..database import SessionLocal
 from ..models.train_task import TrainTask, TrainEpochLog
 from ..models.project import Project
-from ..services.dataset_service import prepare_full_dataset, prepare_detection_dataset
+from ..services.dataset_service import (
+    prepare_full_dataset, prepare_detection_dataset, prepare_classification_dataset,
+)
 from ..config import settings
 
 
@@ -62,7 +64,14 @@ def run_training_pipeline(self, task_id: int):
         db.commit()
 
         # ---- 阶段 1~3: 数据集准备（按任务类型分支）----
-        if task_type == "det":
+        if task_type == "cls":
+            dataset_result = prepare_classification_dataset(
+                project_id=project_id,
+                task_output_dir=str(task_dir),
+                db=db,
+                train_ratio=config.get("train_ratio", 0.8),
+            )
+        elif task_type == "det":
             dataset_result = prepare_detection_dataset(
                 project_id=project_id,
                 task_output_dir=str(task_dir),
@@ -95,14 +104,18 @@ def run_training_pipeline(self, task_id: int):
         task.config = config
         db.commit()
 
-        # ---- 生成 dataset.yaml ----
-        from core.train import generate_dataset_yaml
-        dataset_yaml = str(task_dir / "dataset.yaml")
-        generate_dataset_yaml(
-            dataset_dir=dataset_dir,
-            output_path=dataset_yaml,
-            class_names=class_names,
-        )
+        # ---- 生成 dataset.yaml（cls 模式 Ultralytics 直接吃数据集目录）----
+        if task_type == "cls":
+            # 分类：data 参数直接传 dataset 目录（YOLO 自动按子目录扫描类别）
+            dataset_yaml = dataset_dir
+        else:
+            from core.train import generate_dataset_yaml
+            dataset_yaml = str(task_dir / "dataset.yaml")
+            generate_dataset_yaml(
+                dataset_dir=dataset_dir,
+                output_path=dataset_yaml,
+                class_names=class_names,
+            )
 
         # ---- 阶段 4: 模型训练 ----
         task.status = "training"

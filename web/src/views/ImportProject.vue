@@ -13,10 +13,22 @@
         <el-radio-group v-model="taskType">
           <el-radio-button label="seg">实例分割（Mask + XML）</el-radio-button>
           <el-radio-button label="det">目标检测（图片 + XML）</el-radio-button>
+          <el-radio-button label="cls">图像分类</el-radio-button>
         </el-radio-group>
         <div style="font-size:12px;color:#909399;margin-top:4px">
           <span v-if="taskType === 'seg'">分割：上传原图 + Mask PNG + (可选) XML，按像素值映射类别</span>
-          <span v-else>检测：上传原图 + Pascal VOC XML 标注，按类别名映射</span>
+          <span v-else-if="taskType === 'det'">检测：上传原图 + Pascal VOC XML 标注，按类别名映射</span>
+          <span v-else>分类：图级标签（每张图一个类别），支持 EasyLabel XML 或按文件夹归类</span>
+        </div>
+      </el-form-item>
+      <el-form-item v-if="taskType === 'cls'" label="导入方式" label-width="100px" style="margin-bottom:0;margin-top:8px">
+        <el-radio-group v-model="clsImportMode">
+          <el-radio-button label="folder">按文件夹分类（推荐）</el-radio-button>
+          <el-radio-button label="xml">EasyLabel XML</el-radio-button>
+        </el-radio-group>
+        <div style="font-size:12px;color:#909399;margin-top:4px">
+          <span v-if="clsImportMode === 'folder'">选择本地文件夹，每个一级子目录的名字 = 类别名（OK/Broken/Crack）</span>
+          <span v-else>每张图配一个 XML，XML 中第一个 &lt;name&gt; 即类别</span>
         </div>
       </el-form-item>
     </el-card>
@@ -45,14 +57,20 @@
             <el-input-number v-model="resizeW" :min="640" :step="256" />
           </el-form-item>
         </template>
-        <template v-else>
+        <template v-else-if="taskType === 'det'">
           <el-form-item label="训练图尺寸">
             <el-input-number v-model="cropSize" :min="320" :step="32" />
             <div class="hint">检测项目不滑窗，图片直接以此尺寸训练（推荐与原图一致，如 640）</div>
           </el-form-item>
         </template>
+        <template v-else>
+          <el-form-item label="训练图尺寸">
+            <el-input-number v-model="cropSize" :min="32" :step="32" />
+            <div class="hint">分类项目按此尺寸训练（推荐 224 或与图片实际尺寸一致）</div>
+          </el-form-item>
+        </template>
         <el-form-item>
-          <el-button type="primary" @click="step=1" :disabled="!projectName.trim()">下一步</el-button>
+          <el-button type="primary" @click="goToNextStepAfterBasic" :disabled="!projectName.trim()">下一步</el-button>
         </el-form-item>
       </el-form>
     </el-card>
@@ -116,7 +134,7 @@
         </el-table>
       </template>
 
-      <!-- 检测模式：类别名 → 类别编号 -->
+      <!-- 检测/分类(XML) 模式：类别名 → 类别编号 -->
       <template v-else>
         <div style="margin-bottom:16px">
           <b>配置类别（VOC XML 中 &lt;name&gt; 标签）</b>
@@ -174,8 +192,34 @@
 
     <!-- Step 2: 上传文件 -->
     <el-card v-if="step===2" shadow="never">
+      <!-- 分类 + 文件夹方式：选目录 -->
+      <div v-if="taskType === 'cls' && clsImportMode === 'folder'">
+        <div style="font-weight:600;margin-bottom:12px">选择本地文件夹</div>
+        <p style="font-size:13px;color:#909399;margin-bottom:16px">
+          目录结构应为：<code>父目录 / 类别名 / 图片.bmp</code>。<br>
+          每个一级子目录的名字 = 类别名（例如 Broken / OK / Crack 三个目录）。
+        </p>
+        <input
+          ref="folderInput"
+          type="file"
+          webkitdirectory
+          multiple
+          style="display:none"
+          @change="onFolderPick"
+        />
+        <el-button type="primary" @click="(folderInput as any)?.click?.()">选择目录</el-button>
+        <div v-if="clsFolderFiles.length>0" style="margin-top:12px">
+          <el-alert type="success" :closable="false">
+            <div style="font-size:13px">
+              已识别 <b>{{ clsFolderFiles.length }}</b> 个图片文件，<b>{{ clsFolderClassNames.length }}</b> 个类别：
+              <el-tag v-for="n in clsFolderClassNames" :key="n" size="small" style="margin-right:6px">{{ n }}</el-tag>
+            </div>
+          </el-alert>
+        </div>
+      </div>
+
       <!-- 分割：图片 + Mask -->
-      <el-row :gutter="24" v-if="taskType === 'seg'">
+      <el-row :gutter="24" v-else-if="taskType === 'seg'">
         <el-col :span="12">
           <div style="font-weight:600;margin-bottom:8px">原图（{{ imgFiles.length }} 张）</div>
           <el-upload drag :auto-upload="false" :show-file-list="false" multiple
@@ -198,7 +242,7 @@
         </el-col>
       </el-row>
 
-      <!-- 检测：图片 + XML -->
+      <!-- 检测/分类(XML)：图片 + XML -->
       <el-row :gutter="24" v-else>
         <el-col :span="12">
           <div style="font-weight:600;margin-bottom:8px">原图（{{ imgFiles.length }} 张）</div>
@@ -223,7 +267,8 @@
       </el-row>
 
       <el-alert
-        v-if="imgFiles.length>0 && (taskType==='seg' ? maskFiles.length>0 : xmlFiles.length>0)"
+        v-if="taskType !== 'cls' || clsImportMode === 'xml'"
+        v-show="imgFiles.length>0 && (taskType==='seg' ? maskFiles.length>0 : xmlFiles.length>0)"
         type="info" :closable="false" style="margin-top:16px">
         <div style="font-size:12px">
           原图 {{ imgFiles.length }} 张，{{ taskType==='seg' ? `Mask ${maskFiles.length} 张` : `XML ${xmlFiles.length} 个` }}。
@@ -232,7 +277,7 @@
       </el-alert>
 
       <div style="margin-top:20px;display:flex;gap:10px">
-        <el-button @click="step=1">上一步</el-button>
+        <el-button @click="onPrevFromUpload">上一步</el-button>
         <el-button type="primary" :loading="importing" @click="doImport"
           :disabled="canImport === false">
           开始导入
@@ -249,10 +294,22 @@
         <b>{{ result.stats?.with_ann || 0 }}</b> 张有标注，
         <b>{{ result.stats?.total_polygons || 0 }}</b> 个缺陷多边形
       </div>
-      <div style="color:#606266;margin-bottom:24px" v-else>
+      <div style="color:#606266;margin-bottom:24px" v-else-if="taskType==='det'">
         共导入 <b>{{ result.stats?.total || 0 }}</b> 张图片，
         <b>{{ result.stats?.with_ann || 0 }}</b> 张有标注，
         <b>{{ result.stats?.total_boxes || 0 }}</b> 个 bbox
+      </div>
+      <div style="color:#606266;margin-bottom:24px" v-else>
+        共导入 <b>{{ result.stats?.total || 0 }}</b> 张图片，
+        <b>{{ result.stats?.labeled || 0 }}</b> 张已分类
+        <div style="margin-top:8px;font-size:12px">
+          <el-tag
+            v-for="(cnt, name) in (result.stats?.class_distribution || {})"
+            :key="name" size="small" style="margin-right:6px"
+          >
+            {{ name }}: {{ cnt }}
+          </el-tag>
+        </div>
       </div>
       <el-button type="primary" @click="router.push(`/project/${result.project_id}`)">进入项目</el-button>
     </el-card>
@@ -276,7 +333,59 @@ const router = useRouter()
 const step = ref(0)
 
 // 任务类型
-const taskType = ref<'seg' | 'det'>('seg')
+const taskType = ref<'seg' | 'det' | 'cls'>('seg')
+// 分类导入子模式
+const clsImportMode = ref<'folder' | 'xml'>('folder')
+// 分类文件夹模式：选目录后保留所有文件（含相对路径）
+const folderInput = ref<HTMLInputElement>()
+const clsFolderFiles = ref<File[]>([])
+const clsFolderClassNames = ref<string[]>([])
+
+function onFolderPick(e: Event) {
+  const target = e.target as HTMLInputElement
+  if (!target.files) return
+  const files: File[] = []
+  const classSet = new Set<string>()
+  const exts = ['.bmp','.png','.jpg','.jpeg','.tif','.tiff']
+  for (const f of Array.from(target.files)) {
+    // webkitRelativePath 形如 "Broken/img1.bmp"
+    const rel = (f as any).webkitRelativePath || f.name
+    const parts = rel.split('/')
+    if (parts.length < 2) continue  // 只取深度 ≥2 的文件
+    const ext = '.' + parts[parts.length - 1].split('.').pop()!.toLowerCase()
+    if (!exts.includes(ext)) continue
+    // 一级子目录是类别名
+    const cls = parts[parts.length - 2]
+    classSet.add(cls)
+    files.push(f)
+  }
+  clsFolderFiles.value = files
+  clsFolderClassNames.value = Array.from(classSet).sort()
+  if (files.length === 0) {
+    ElMessage.warning('未识别到 类别/图片 结构的文件，请检查目录')
+  } else {
+    ElMessage.success(`识别到 ${classSet.size} 个类别，共 ${files.length} 张图片`)
+  }
+}
+
+function goToNextStepAfterBasic() {
+  if (!projectName.value.trim()) return
+  // 分类 + 文件夹方式：跳过类别配置，直接到上传
+  if (taskType.value === 'cls' && clsImportMode.value === 'folder') {
+    step.value = 2
+  } else {
+    step.value = 1
+  }
+}
+
+function onPrevFromUpload() {
+  // 分类 + 文件夹模式没有 step 1，回 step 0
+  if (taskType.value === 'cls' && clsImportMode.value === 'folder') {
+    step.value = 0
+  } else {
+    step.value = 1
+  }
+}
 
 // Step 0
 const projectName = ref('')
@@ -353,7 +462,9 @@ async function scanVocClasses() {
   try {
     const fd = new FormData()
     scanXmlFiles.value.forEach(f => fd.append('files', f))
-    const { data } = await api.post('/import/voc-scan', fd, {
+    // cls + xml 走 cls-xml-scan 端点（实际后端逻辑相同 — 都是统计 <name>）
+    const endpoint = taskType.value === 'cls' ? '/import/cls-xml-scan' : '/import/voc-scan'
+    const { data } = await api.post(endpoint, fd, {
       headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
     })
     const classes = data.classes as Record<string, number>  // {name: count}
@@ -388,6 +499,9 @@ function onMaskChange(f: UploadFile) { if (f.raw) maskFiles.value.push(f.raw) }
 function onXmlChange(f: UploadFile) { if (f.raw) xmlFiles.value.push(f.raw) }
 
 const canImport = computed(() => {
+  if (taskType.value === 'cls' && clsImportMode.value === 'folder') {
+    return clsFolderFiles.value.length > 0
+  }
   if (imgFiles.value.length === 0) return false
   if (taskType.value === 'seg') return maskFiles.value.length > 0
   return xmlFiles.value.length > 0
@@ -403,6 +517,51 @@ async function doImport() {
     const fd = new FormData()
     fd.append('project_name', projectName.value)
     fd.append('description', description.value)
+
+    // ====== 分类 + 文件夹方式 ======
+    if (taskType.value === 'cls' && clsImportMode.value === 'folder') {
+      fd.append('crop_size', String(cropSize.value))
+      // 直接把所有文件丢进 'files'，filename 用 webkitRelativePath（含类别前缀）
+      for (const f of clsFolderFiles.value) {
+        const rel = (f as any).webkitRelativePath || f.name
+        // 用第三个参数指定文件名（保留相对路径）
+        fd.append('files', f, rel)
+      }
+      const { data } = await api.post('/import/cls-folder-run', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 600000,
+      })
+      result.value = data
+      step.value = 3
+      ElMessage.success('分类导入完成！')
+      return
+    }
+
+    // ====== 分类 + XML 方式 ======
+    if (taskType.value === 'cls' && clsImportMode.value === 'xml') {
+      const mapping: Record<string, any> = {}
+      for (const c of detClasses.value) {
+        if (!c.name.trim()) continue
+        mapping[c.name] = { class_index: c.classIndex, color: c.color }
+      }
+      if (Object.keys(mapping).length === 0) {
+        ElMessage.error('请至少配置一个类别')
+        importing.value = false
+        return
+      }
+      fd.append('crop_size', String(cropSize.value))
+      fd.append('class_mapping_json', JSON.stringify(mapping))
+      imgFiles.value.forEach(f => fd.append('images', f))
+      xmlFiles.value.forEach(f => fd.append('xmls', f))
+      const { data } = await api.post('/import/cls-xml-run', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 600000,
+      })
+      result.value = data
+      step.value = 3
+      ElMessage.success('分类导入完成！')
+      return
+    }
 
     if (taskType.value === 'seg') {
       // 分割：原有逻辑

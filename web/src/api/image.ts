@@ -12,6 +12,7 @@ export interface ImageInfo {
   reviewer: string | null
   created_at: string
   annotation_count: number
+  class_id?: number | null  // cls 项目专用：图级分类的类别 id
 }
 
 export interface ImageListResponse {
@@ -44,6 +45,14 @@ export const imageApi = {
 
   updateStatus: (imageId: number, status: string, annotator?: string) =>
     api.put(`/images/${imageId}/status`, { status, annotator }),
+
+  /** 批量给图片打分类标签（cls 项目专用） */
+  batchSetClass: (projectId: number, imageIds: number[], classId: number | null, annotator?: string) =>
+    api.put(`/projects/${projectId}/images/batch-class`, {
+      image_ids: imageIds,
+      class_id: classId,
+      annotator,
+    }),
 
   delete: (imageId: number) =>
     api.delete(`/images/${imageId}`),

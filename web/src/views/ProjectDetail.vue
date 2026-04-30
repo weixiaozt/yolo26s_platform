@@ -16,6 +16,13 @@
           上传图像
         </el-button>
         <el-button
+          v-if="project?.task_type === 'cls'"
+          type="primary" plain
+          @click="router.push(`/cls-annotate/${id}`)"
+        >
+          批量分类标注
+        </el-button>
+        <el-button
           type="success"
           :disabled="!project || project.labeled_count + project.reviewed_count === 0"
           @click="router.push(`/project/${id}/train`)"
@@ -289,7 +296,12 @@ function getThumbUrl(imageId: number) {
 }
 
 function goAnnotate(imageId: number) {
-  router.push(`/annotate/${projectId}/${imageId}`)
+  // cls 项目跳到批量标注，其他跳到单图标注器
+  if (project.value?.task_type === 'cls') {
+    router.push(`/cls-annotate/${projectId}`)
+  } else {
+    router.push(`/annotate/${projectId}/${imageId}`)
+  }
 }
 
 function statusLabel(s: string) {

@@ -43,6 +43,12 @@ const router = createRouter({
       props: true,
     },
     {
+      path: '/cls-annotate/:projectId',
+      name: 'ClsAnnotator',
+      component: () => import('../views/ClsAnnotator.vue'),
+      props: true,
+    },
+    {
       path: '/project/:id/train',
       name: 'TrainConfig',
       component: () => import('../views/TrainConfig.vue'),

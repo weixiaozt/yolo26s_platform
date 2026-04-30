@@ -16,6 +16,7 @@ class ImageOut(BaseModel):
     reviewer: Optional[str]
     created_at: datetime
     annotation_count: int = 0
+    class_id: Optional[int] = None  # cls 项目的图级分类 id
     model_config = {"from_attributes": True}
 
 

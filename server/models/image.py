@@ -28,6 +28,12 @@ class Image(Base):
         Enum("unlabeled", "labeling", "labeled", "reviewed", name="image_status"),
         default="unlabeled"
     )
+    # 图级分类标签（仅 task_type='cls' 项目使用，外键到 defect_classes.id）
+    class_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("defect_classes.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+        comment="图像分类项目专用：图级分类的类别 id",
+    )
     annotator: Mapped[str | None] = mapped_column(String(100), nullable=True)
     reviewer: Mapped[str | None] = mapped_column(String(100), nullable=True)
 

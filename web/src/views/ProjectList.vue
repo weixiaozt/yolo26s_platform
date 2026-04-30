@@ -40,8 +40,8 @@
         </template>
         <p class="project-desc">{{ p.description || '暂无描述' }}</p>
         <div class="project-meta">
-          <el-tag :type="(p.task_type || 'seg') === 'det' ? 'warning' : 'success'" size="small" effect="plain">
-            {{ (p.task_type || 'seg') === 'det' ? '目标检测' : '实例分割' }}
+          <el-tag :type="taskTypeTag(p.task_type)" size="small" effect="plain">
+            {{ taskTypeLabel(p.task_type) }}
           </el-tag>
           <span>
             <el-icon><Picture /></el-icon>
@@ -98,10 +98,12 @@
           <el-radio-group v-model="form.task_type">
             <el-radio-button label="seg">实例分割（Seg）</el-radio-button>
             <el-radio-button label="det">目标检测（Det）</el-radio-button>
+            <el-radio-button label="cls">图像分类（Cls）</el-radio-button>
           </el-radio-group>
           <div class="hint" style="margin-top:4px">
             <span v-if="form.task_type === 'seg'">分割：标注多边形区域，输出像素级 Mask</span>
-            <span v-else>检测：标注矩形框，仅输出 bbox（适合小图、规整目标）</span>
+            <span v-else-if="form.task_type === 'det'">检测：标注矩形框，仅输出 bbox（适合小图、规整目标）</span>
+            <span v-else>分类：图级标签（每张图一个类别），适合小图缺陷分类</span>
           </div>
         </el-form-item>
         <el-form-item label="项目描述">
@@ -123,8 +125,12 @@
         </el-row>
         <el-row :gutter="16">
           <el-col :span="12">
-            <el-form-item :label="form.task_type === 'det' ? '训练图尺寸' : '切割尺寸'">
-              <el-input-number v-model="form.crop_size" :min="320" :max="8192" :step="32" style="width:100%" />
+            <el-form-item :label="cropSizeLabel">
+              <el-input-number
+                v-model="form.crop_size"
+                :min="form.task_type === 'cls' ? 32 : 320"
+                :max="8192" :step="32" style="width:100%"
+              />
             </el-form-item>
           </el-col>
           <el-col :span="12" v-if="form.task_type === 'seg'">
@@ -160,10 +166,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { projectApi, type Project, type ProjectCreate, type DefectClass } from '../api/project'
+
+function taskTypeLabel(t: string | undefined) {
+  return ({ seg: '实例分割', det: '目标检测', cls: '图像分类' } as any)[t || 'seg'] || '实例分割'
+}
+function taskTypeTag(t: string | undefined) {
+  return ({ seg: 'success', det: 'warning', cls: 'primary' } as any)[t || 'seg'] || 'success'
+}
 
 const router = useRouter()
 const projects = ref<Project[]>([])
@@ -187,6 +200,13 @@ const form = ref<ProjectCreate>({
     { class_index: 1, name: 'defect_2', color: '#44BB44' },
     { class_index: 2, name: 'defect_3', color: '#4488FF' },
   ],
+})
+
+const cropSizeLabel = computed(() => {
+  const t = form.value.task_type
+  if (t === 'cls') return '训练图尺寸'
+  if (t === 'det') return '训练图尺寸'
+  return '切割尺寸'
 })
 
 function addClass() {

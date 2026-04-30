@@ -51,6 +51,34 @@ def init_db():
             "COMMENT 'Ultralytics fitness 最佳值（与 best.pt 同步）'",
             "train_tasks.best_fitness",
         ),
+        # 扩展 task_type ENUM 加 cls
+        (
+            "ALTER TABLE projects MODIFY COLUMN task_type ENUM('seg','det','cls') "
+            "NOT NULL DEFAULT 'seg' COMMENT '任务类型: seg=分割, det=目标检测, cls=图像分类'",
+            "projects.task_type 扩展 cls",
+        ),
+        (
+            "ALTER TABLE images ADD COLUMN class_id INT NULL "
+            "COMMENT '分类项目专用：图级分类的类别 id'",
+            "images.class_id",
+        ),
+        (
+            "ALTER TABLE images ADD CONSTRAINT fk_images_class_id "
+            "FOREIGN KEY (class_id) REFERENCES defect_classes(id) ON DELETE SET NULL",
+            "images.class_id 外键",
+        ),
+        (
+            "CREATE INDEX idx_images_class_id ON images(class_id)",
+            "images.class_id 索引",
+        ),
+        (
+            "ALTER TABLE train_epoch_logs ADD COLUMN top1_acc FLOAT NULL COMMENT 'cls top1'",
+            "train_epoch_logs.top1_acc",
+        ),
+        (
+            "ALTER TABLE train_epoch_logs ADD COLUMN top5_acc FLOAT NULL COMMENT 'cls top5'",
+            "train_epoch_logs.top5_acc",
+        ),
     ]
     for sql, label in migrations:
         with engine.connect() as conn:

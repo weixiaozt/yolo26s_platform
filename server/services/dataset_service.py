@@ -419,6 +419,121 @@ def prepare_detection_dataset(
     }
 
 
+def prepare_classification_dataset(
+    project_id: int,
+    task_output_dir: str,
+    db: Session,
+    train_ratio: float = 0.8,
+    seed: int = 42,
+    progress_callback=None,
+) -> dict:
+    """
+    分类数据集准备（YOLO 标准结构）：
+
+        dataset/
+        ├── train/
+        │   ├── ClassA/
+        │   │   ├── 1.bmp ...
+        │   ├── ClassB/
+        ├── val/
+        │   ├── ClassA/
+        │   ├── ClassB/
+
+    数据来源：images.class_id（图级分类标签）。
+    """
+    import random
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ValueError(f"项目不存在: {project_id}")
+
+    # 类别映射: class_id → class_name
+    classes = (
+        db.query(DefectClass)
+        .filter(DefectClass.project_id == project_id)
+        .order_by(DefectClass.class_index)
+        .all()
+    )
+    if not classes:
+        raise ValueError("项目无类别定义")
+    cls_id_to_name = {dc.id: dc.name for dc in classes}
+    class_names = [dc.name for dc in classes]
+
+    # 已标注（有 class_id）的图片
+    images = (
+        db.query(Image)
+        .filter(Image.project_id == project_id, Image.class_id.isnot(None))
+        .all()
+    )
+    if not images:
+        raise ValueError("没有已打分类标签的图像")
+
+    if progress_callback:
+        progress_callback(0, 2, "分类数据集导出...")
+
+    # 按类别分组
+    by_class: dict[int, list[Image]] = {}
+    for img in images:
+        by_class.setdefault(img.class_id, []).append(img)
+
+    task_dir = Path(task_output_dir)
+    dataset_dir = task_dir / "dataset"
+    for split in ("train", "val"):
+        for name in class_names:
+            (dataset_dir / split / name).mkdir(parents=True, exist_ok=True)
+
+    random.seed(seed)
+    train_count = 0
+    val_count = 0
+    per_class_stats = {}
+
+    for cls_id, imgs in by_class.items():
+        cls_name = cls_id_to_name.get(cls_id)
+        if not cls_name:
+            continue
+        random.shuffle(imgs)
+        split_idx = max(1, int(len(imgs) * train_ratio))
+        train_imgs = imgs[:split_idx]
+        val_imgs = imgs[split_idx:]
+        # 至少 1 张验证集
+        if not val_imgs and len(train_imgs) > 1:
+            val_imgs = [train_imgs.pop()]
+        per_class_stats[cls_name] = {"train": len(train_imgs), "val": len(val_imgs)}
+
+        for split, img_list in (("train", train_imgs), ("val", val_imgs)):
+            for img in img_list:
+                # 源路径
+                fp = Path(img.file_path)
+                if not fp.is_absolute():
+                    fp = settings.upload_path / img.file_path
+                if not fp.exists():
+                    continue
+
+                # 目标：dataset/<split>/<class>/<image_id>.<ext>
+                ext = fp.suffix.lower() or '.png'
+                if ext not in {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}:
+                    ext = '.png'
+                dst = dataset_dir / split / cls_name / f"{img.id:08d}{ext}"
+                shutil.copy2(str(fp), str(dst))
+                if split == "train":
+                    train_count += 1
+                else:
+                    val_count += 1
+
+    if progress_callback:
+        progress_callback(2, 2, "数据集准备完成")
+
+    return {
+        "dataset_dir": str(dataset_dir),
+        "class_names": class_names,
+        "split_stats": {
+            "train": train_count,
+            "val": val_count,
+            "per_class": per_class_stats,
+        },
+    }
+
+
 def prepare_full_dataset(
     project_id: int,
     task_output_dir: str,

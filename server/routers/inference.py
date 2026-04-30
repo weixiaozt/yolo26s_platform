@@ -98,6 +98,69 @@ def list_devices():
     return devices
 
 
+def _run_cls_inference(model, img_array, content, file, project_id, task_id, device, db):
+    """分类推断：返回 top-1 类别 + top-5 概率"""
+    import time
+    t0 = time.time()
+    # YOLO classify 直接接受图片数组，会自动 resize 到模型 imgsz
+    results = model.predict(img_array, verbose=False, device=device if device != "cpu" else "cpu")
+    elapsed = time.time() - t0
+
+    r0 = results[0] if results else None
+    top1_id = -1
+    top1_conf = 0.0
+    top5 = []  # [{class_id, class_name, confidence}]
+
+    if r0 is not None and getattr(r0, "probs", None) is not None:
+        probs = r0.probs
+        top1_id = int(probs.top1) if hasattr(probs, "top1") else -1
+        top1_conf = float(probs.top1conf) if hasattr(probs, "top1conf") else 0.0
+        # top-5
+        if hasattr(probs, "top5") and hasattr(probs, "top5conf"):
+            ids = probs.top5
+            confs = probs.top5conf.cpu().numpy().tolist() if hasattr(probs.top5conf, "cpu") else list(probs.top5conf)
+            for cid, conf in zip(ids, confs):
+                top5.append({"class_id": int(cid), "confidence": round(float(conf), 4)})
+
+    # 类别名映射
+    class_names = {}
+    if project_id > 0:
+        dcs = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
+        class_names = {dc.class_index: dc.name for dc in dcs}
+    for d in top5:
+        d["class_name"] = class_names.get(d["class_id"], f"C{d['class_id']}")
+    top1_name = class_names.get(top1_id, f"C{top1_id}")
+
+    # 保存原图（cls 不需要 overlay/mask）
+    infer_dir = settings.runs_path / "inference"
+    infer_dir.mkdir(parents=True, exist_ok=True)
+    rid = uuid.uuid4().hex[:12]
+    cv2.imwrite(str(infer_dir / f"{rid}_original.png"), img_array)
+    url_pfx = "/static/storage/runs/inference"
+
+    # 复用 InferenceResult 表（detections 字段存 top5）
+    record = InferenceResult(
+        project_id=project_id, task_id=task_id,
+        filename=file.filename or "unknown", device=device,
+        conf_thresh=0.0, iou_thresh=0.0, resize_size=0,
+        num_detections=1 if top1_id >= 0 else 0,
+        inference_time=round(elapsed, 3),
+        detections=top5,
+        original_path=f"{url_pfx}/{rid}_original.png",
+    )
+    db.add(record); db.commit(); db.refresh(record)
+
+    return {
+        "id": record.id,
+        "task_type": "cls",
+        "filename": record.filename,
+        "inference_time": record.inference_time,
+        "top1": {"class_id": top1_id, "class_name": top1_name, "confidence": round(top1_conf, 4)},
+        "top5": top5,
+        "original_url": record.original_path,
+    }
+
+
 @router.post("/run")
 async def run_inference(
     file: UploadFile = File(...),
@@ -123,6 +186,7 @@ async def run_inference(
     # 推断配置（从训练任务获取）
     crop_size, overlap = 640, 0.2
     use_morphology, dilate_kernel, erode_kernel = False, 3, 3
+    task_type = "seg"
     if task_id > 0:
         task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
         if task and task.config:
@@ -131,18 +195,28 @@ async def run_inference(
             use_morphology = task.config.get("use_morphology", False)
             dilate_kernel = task.config.get("dilate_kernel", 3)
             erode_kernel = task.config.get("erode_kernel", 3)
+            task_type = task.config.get("task_type", "seg")
         if not project_id and task:
             project_id = task.project_id
-    print(f"[推断] task_id={task_id}, use_morphology={use_morphology}, config_keys={list(task.config.keys()) if task and task.config else None}")
+    print(f"[推断] task_id={task_id}, task_type={task_type}, use_morphology={use_morphology}")
 
-    # 读取图像（保持原始格式，灰度转换由 inference 内部处理）
+    # 读取图像
     content = await file.read()
     img_array = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_UNCHANGED)
     if img_array is None:
         raise HTTPException(status_code=400, detail="无法读取图像")
 
-    # 加载模型并推断
+    # 加载模型
     model = _get_model(mp)
+
+    # 分类推断走简化路径（不滑窗，输入整张图）
+    if task_type == "cls":
+        return _run_cls_inference(
+            model=model, img_array=img_array, content=content,
+            file=file, project_id=project_id, task_id=task_id,
+            device=device, db=db,
+        )
+
     from core.inference import infer_single_image
     result = infer_single_image(
         model=model, image=img_array,

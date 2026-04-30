@@ -166,6 +166,7 @@ def list_images(
             reviewer=img.reviewer,
             created_at=img.created_at,
             annotation_count=ann_counts.get(img.id, 0),
+            class_id=img.class_id,
         )
         for img in images
     ]
@@ -218,6 +219,62 @@ def update_image_status(
 
     db.commit()
     return {"ok": True}
+
+
+@router.put("/projects/{project_id}/images/batch-class")
+def batch_set_class(
+    project_id: int,
+    body: dict,  # {"image_ids": [int], "class_id": int|null, "annotator": str|null}
+    db: Session = Depends(get_db),
+):
+    """
+    批量给图片打分类标签（cls 项目专用）。
+    image_ids: 要打标的图片 id 列表
+    class_id: 类别 id（null 表示清空标签 → unlabeled）
+    """
+    from ..models.project import Project
+    from ..models.defect_class import DefectClass
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.task_type != "cls":
+        raise HTTPException(status_code=400, detail=f"仅分类项目支持批量打标，当前 task_type={project.task_type}")
+
+    image_ids = body.get("image_ids") or []
+    class_id = body.get("class_id")
+    annotator = body.get("annotator")
+
+    if not isinstance(image_ids, list) or not image_ids:
+        raise HTTPException(status_code=400, detail="image_ids 不能为空")
+
+    # 校验 class_id 属于项目
+    if class_id is not None:
+        ok = (
+            db.query(DefectClass.id)
+            .filter(DefectClass.id == class_id, DefectClass.project_id == project_id)
+            .first()
+        )
+        if not ok:
+            raise HTTPException(status_code=400, detail=f"class_id {class_id} 不属于项目 {project_id}")
+
+    # 批量更新
+    images = (
+        db.query(Image)
+        .filter(Image.project_id == project_id, Image.id.in_(image_ids))
+        .all()
+    )
+    updated = 0
+    for img in images:
+        img.class_id = class_id
+        # 状态：有 class_id → labeled，否则 → unlabeled
+        if img.status != "reviewed":  # OK 标记不覆盖
+            img.status = "labeled" if class_id is not None else "unlabeled"
+        if annotator:
+            img.annotator = annotator
+        updated += 1
+    db.commit()
+    return {"ok": True, "updated": updated}
 
 
 @router.delete("/images/{image_id}", status_code=204)

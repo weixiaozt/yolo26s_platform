@@ -65,7 +65,13 @@
             </el-form-item>
             <el-form-item label="模型尺寸">
               <el-select v-model="c.model_name" style="width:100%">
-                <template v-if="taskType === 'det'">
+                <template v-if="taskType === 'cls'">
+                  <el-option label="Nano  — 最快，~1.5M 参数（推荐小数据）" value="yolo11n-cls.pt" />
+                  <el-option label="Small — 均衡，~5M 参数" value="yolo11s-cls.pt" />
+                  <el-option label="Medium — 更精准，~10M 参数" value="yolo11m-cls.pt" />
+                  <el-option label="Large — 高精度，~13M 参数" value="yolo11l-cls.pt" />
+                </template>
+                <template v-else-if="taskType === 'det'">
                   <el-option label="Nano  — 最快，~3M 参数（推荐小数据）" value="yolo26n.pt" />
                   <el-option label="Small — 均衡，~22M 参数" value="yolo26s.pt" />
                   <el-option label="Medium — 更精准，~38M 参数" value="yolo26m.pt" />
@@ -277,7 +283,7 @@ const resumeTaskId = ref<number|null>(null)
 const resumeModelType = ref('best')
 const completedTasks = ref<any[]>([])
 const currentClassCount = ref(0)
-const taskType = ref<'seg'|'det'>('seg')
+const taskType = ref<'seg'|'det'|'cls'>('seg')
 
 const classCountWarning = computed(() => {
   if (trainMode.value !== 'finetune' || !resumeTaskId.value) return ''
@@ -296,12 +302,20 @@ onMounted(async () => {
   try {
     const { data: proj } = await api.get(`/projects/${props.id}`)
     currentClassCount.value = proj.defect_classes?.length || 0
-    taskType.value = (proj.task_type || 'seg') as 'seg' | 'det'
+    taskType.value = (proj.task_type || 'seg') as 'seg' | 'det' | 'cls'
     // 检测项目使用不同的默认模型和参数
     if (taskType.value === 'det') {
       c.value.model_name = 'yolo26n.pt'  // 检测默认 nano
       c.value.use_morphology = false       // 检测不需要形态学
       c.value.train_ratio = 0.85
+    } else if (taskType.value === 'cls') {
+      c.value.model_name = 'yolo11s-cls.pt'  // 分类默认 small
+      c.value.use_morphology = false
+      c.value.train_ratio = 0.8
+      // 分类不需要的参数置 0/默认
+      c.value.mosaic = 0
+      c.value.copy_paste = 0
+      c.value.mixup = 0
     }
   } catch {}
   // 加载已完成的训练任务

@@ -16,6 +16,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+# 提升 multipart 上传最大文件数（默认 1000，分类项目按文件夹导入会超）
+try:
+    from starlette.formparsers import MultiPartParser as _MPP
+    _orig_init = _MPP.__init__
+    def _patched_init(self, *args, **kwargs):
+        kwargs['max_files'] = 100000
+        kwargs['max_fields'] = 100000
+        _orig_init(self, *args, **kwargs)
+    _MPP.__init__ = _patched_init
+except Exception as _e:
+    print(f"[WARN] 无法 patch MultiPartParser: {_e}")
+
 from .config import settings
 from .database import init_db
 

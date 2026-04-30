@@ -86,6 +86,10 @@ class TrainEpochLog(Base):
     map50_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     map50_95_m: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # 分类任务专用指标
+    top1_acc: Mapped[float | None] = mapped_column(Float, nullable=True, comment="cls: top1 accuracy")
+    top5_acc: Mapped[float | None] = mapped_column(Float, nullable=True, comment="cls: top5 accuracy")
+
     lr: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # 关系
