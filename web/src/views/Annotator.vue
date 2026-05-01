@@ -141,7 +141,7 @@ const toolHint = computed(()=>{
     rect:'点击拖拽画矩形',
     brush:'按住涂抹·松开生成标注',circle:'点击拖拽画圆',
     polyline:isDrawing.value?'点击加折点·双击/回车完成':'点击开始画折线',
-    eraser:'按住涂抹擦除标注区域',boxEraser:'拖拽框选删除',select:'点击标注后可拖动顶点编辑·Ctrl+C复制·Ctrl+V粘贴',
+    eraser:'按住涂抹擦除标注区域',boxEraser:'拖拽框选删除',select:'点击标注后可拖动顶点编辑·拖动绿色圆点旋转·Ctrl+C复制·Ctrl+V粘贴',
   })[currentTool.value]||''
 })
 const canvasAreaRef = ref<HTMLElement>()
@@ -672,13 +672,101 @@ function highlightSelected(){
   canvas.requestRenderAll()
 }
 
-// ====== 顶点编辑（仅 select 工具）======
+// ====== 顶点编辑 + 整体旋转（仅 select 工具）======
 function showVertexHandles(idx:number){
   removeVertexHandles()
   if(!canvas||!currentImage.value)return
   const ann=annotations.value[idx]
   if(!ann)return
   const W=currentImage.value.width,H=currentImage.value.height
+
+  // ---- 旋转手柄（绿色圆点，在 polygon 上方）----
+  const xsAll=ann.polygon.map(p=>p.x*W)
+  const ysAll=ann.polygon.map(p=>p.y*H)
+  const rotCx=xsAll.reduce((a,b)=>a+b,0)/xsAll.length
+  const rotCy=ysAll.reduce((a,b)=>a+b,0)/ysAll.length
+  const rotMinY=Math.min(...ysAll)
+  const rotHandleY=Math.max(8,rotMinY-22)   // 上方 22 px，至少留 8px
+  const rotR=5
+  // 中心 → 手柄的虚线连接
+  const stem=new fabric.Line([rotCx,rotCy,rotCx,rotHandleY],{
+    stroke:'#52C41A',strokeWidth:1,strokeDashArray:[3,3],
+    selectable:false,evented:false,
+  })
+  ;(stem as any)._handle=true
+  canvas.add(stem)
+  editHandles.push(stem)
+
+  const rotHandle=new fabric.Circle({
+    left:rotCx-rotR,top:rotHandleY-rotR,radius:rotR,
+    fill:'#52C41A',stroke:'#fff',strokeWidth:1.5,
+    hasControls:false,hasBorders:false,
+    selectable:true,evented:true,
+    hoverCursor:'crosshair',
+    originX:'left',originY:'top',
+    lockRotation:true,lockScalingX:true,lockScalingY:true,
+  })
+  ;(rotHandle as any)._handle=true
+  ;(rotHandle as any)._rotHandle=true
+  ;(rotHandle as any)._annIdx=idx
+  // 缓存：mousedown 时记录原始 polygon + 起始角度，moving 时基于增量旋转避免累积误差
+  let origPoly:Point[]|null=null
+  let origAngle=0
+  let rotMoved=false
+  rotHandle.on('mousedown',()=>{
+    origPoly=ann.polygon.map(p=>({x:p.x,y:p.y}))
+    const sx=(rotHandle.left||0)+rotR-rotCx
+    const sy=(rotHandle.top||0)+rotR-rotCy
+    origAngle=Math.atan2(sy,sx)
+    rotMoved=false
+  })
+  rotHandle.on('moving',()=>{
+    if(!origPoly||!currentImage.value)return
+    rotMoved=true
+    const W2=currentImage.value.width,H2=currentImage.value.height
+    const hx=(rotHandle.left||0)+rotR
+    const hy=(rotHandle.top||0)+rotR
+    const angleNow=Math.atan2(hy-rotCy,hx-rotCx)
+    const delta=angleNow-origAngle
+    const cosD=Math.cos(delta),sinD=Math.sin(delta)
+    for(let i=0;i<origPoly.length;i++){
+      const px=origPoly[i].x*W2-rotCx
+      const py=origPoly[i].y*H2-rotCy
+      const nx=rotCx+px*cosD-py*sinD
+      const ny=rotCy+px*sinD+py*cosD
+      annotations.value[idx].polygon[i]={
+        x:Math.max(0,Math.min(1,nx/W2)),
+        y:Math.max(0,Math.min(1,ny/H2)),
+      }
+    }
+    // 实时更新 polygon 显示
+    const polyObj=canvas!.getObjects().find(o=>(o as any)._ann&&(o as any)._idx===idx) as fabric.Polygon|undefined
+    if(polyObj){
+      const pts=annotations.value[idx].polygon.map(pt=>({x:pt.x*W2,y:pt.y*H2}))
+      polyObj.set({points:pts as any})
+      ;(polyObj as any)._calcDimensions?.()
+      polyObj.setCoords()
+      polyObj.dirty=true
+    }
+    // 同步更新虚线连接
+    stem.set({x1:rotCx,y1:rotCy,x2:hx,y2:hy})
+    ;(stem as any).setCoords?.()
+    canvas!.requestRenderAll()
+  })
+  rotHandle.on('modified',()=>{
+    if(!rotMoved){origPoly=null;return}   // 没真的拖动，不入栈不触发保存
+    pushUndo()  // 旋转完成入 undo（拖一次只入栈一次）
+    origPoly=null
+    dirty.value=true
+    scheduleAutoSave()
+    renderAnnotations()
+    showVertexHandles(idx)   // 重建 handles 到新位置
+    highlightSelected()
+  })
+  canvas.add(rotHandle)
+  editHandles.push(rotHandle)
+
+  // ---- 4 个角顶点 ----
   ann.polygon.forEach((p,i)=>{
     const handle=new fabric.Circle({
       left:p.x*W-3,top:p.y*H-3,radius:3,
