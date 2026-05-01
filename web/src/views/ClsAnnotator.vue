@@ -136,13 +136,18 @@ const stats = computed(() => {
 })
 const progressPct = computed(() => stats.value.total ? Math.round(stats.value.labeled * 100 / stats.value.total) : 0)
 
-const classCounts = computed(() => {
-  const m = new Map<number, number>()
-  for (const img of items.value) {
-    if (img.class_id) m.set(img.class_id, (m.get(img.class_id) || 0) + 1)
-  }
-  return m
-})
+// 全量类别统计（项目级，不是当前页）
+const classCounts = ref<Map<number, number>>(new Map())
+async function loadClassStats() {
+  try {
+    const { data } = await imageApi.getClassStats(parseInt(props.projectId))
+    const m = new Map<number, number>()
+    for (const [cid, cnt] of Object.entries(data.by_class || {})) {
+      m.set(parseInt(cid), cnt as number)
+    }
+    classCounts.value = m
+  } catch {}
+}
 
 function classColor(cid: number) {
   return defectClasses.value.find(c => c.id === cid)?.color || '#999'
@@ -189,6 +194,7 @@ async function reload() {
   selected.value.clear()
   await loadPage()
   await loadProject()
+  await loadClassStats()
 }
 
 async function onPageChange(p: number) {
@@ -253,8 +259,9 @@ async function applyClass(classId: number | null) {
     }
     saveState.value = 'saved'
     setTimeout(() => { if (saveState.value === 'saved') saveState.value = 'idle' }, 1500)
-    // 刷项目统计（标注计数变化）
+    // 刷项目统计（标注计数变化）+ 全量类别计数
     await loadProject()
+    await loadClassStats()
   } catch (e: any) {
     saveState.value = 'error'
     ElMessage.error('打标失败：' + (e?.response?.data?.detail || e?.message || ''))
@@ -288,6 +295,7 @@ onMounted(async () => {
   await loadProject()
   if (project.value?.task_type === 'cls') {
     await loadPage()
+    await loadClassStats()
   }
   rootRef.value?.focus()
 })

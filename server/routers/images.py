@@ -277,6 +277,32 @@ def batch_set_class(
     return {"ok": True, "updated": updated}
 
 
+@router.get("/projects/{project_id}/images/class-stats")
+def get_class_stats(project_id: int, db: Session = Depends(get_db)):
+    """
+    返回项目每个类别下的图片计数 + 未分类的数量（cls 项目右侧统计面板用）。
+    返回:
+        {"by_class": {class_id: count, ...}, "unlabeled": int, "total": int}
+    """
+    from sqlalchemy import func
+    rows = (
+        db.query(Image.class_id, func.count(Image.id))
+        .filter(Image.project_id == project_id)
+        .group_by(Image.class_id)
+        .all()
+    )
+    by_class: dict[int, int] = {}
+    unlabeled = 0
+    total = 0
+    for cid, cnt in rows:
+        total += cnt
+        if cid is None:
+            unlabeled += cnt
+        else:
+            by_class[int(cid)] = int(cnt)
+    return {"by_class": by_class, "unlabeled": unlabeled, "total": total}
+
+
 @router.delete("/images/{image_id}", status_code=204)
 def delete_image(image_id: int, db: Session = Depends(get_db)):
     """删除图像及其标注"""

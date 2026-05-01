@@ -54,6 +54,12 @@ export const imageApi = {
       annotator,
     }),
 
+  /** cls 项目：项目级类别计数（每类多少张 + 未分类数 + 总数） */
+  getClassStats: (projectId: number) =>
+    api.get<{ by_class: Record<string, number>; unlabeled: number; total: number }>(
+      `/projects/${projectId}/images/class-stats`,
+    ),
+
   delete: (imageId: number) =>
     api.delete(`/images/${imageId}`),
 }
