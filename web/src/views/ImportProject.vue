@@ -13,11 +13,13 @@
         <el-radio-group v-model="taskType">
           <el-radio-button label="seg">实例分割（Mask + XML）</el-radio-button>
           <el-radio-button label="det">目标检测（图片 + XML）</el-radio-button>
+          <el-radio-button label="obb">旋转检测（图片 + XML）</el-radio-button>
           <el-radio-button label="cls">图像分类</el-radio-button>
         </el-radio-group>
         <div style="font-size:12px;color:#909399;margin-top:4px">
           <span v-if="taskType === 'seg'">分割：上传原图 + Mask PNG + (可选) XML，按像素值映射类别</span>
           <span v-else-if="taskType === 'det'">检测：上传原图 + Pascal VOC XML 标注，按类别名映射</span>
+          <span v-else-if="taskType === 'obb'">旋转检测：与检测共用 VOC XML 格式；训练时配合 degrees=180 增强自动学到角度（适合航拍/密集斜目标）</span>
           <span v-else>分类：图级标签（每张图一个类别），支持 EasyLabel XML 或按文件夹归类</span>
         </div>
       </el-form-item>
@@ -57,10 +59,10 @@
             <el-input-number v-model="resizeW" :min="640" :step="256" />
           </el-form-item>
         </template>
-        <template v-else-if="taskType === 'det'">
+        <template v-else-if="taskType === 'det' || taskType === 'obb'">
           <el-form-item label="训练图尺寸">
             <el-input-number v-model="cropSize" :min="320" :step="32" />
-            <div class="hint">检测项目不滑窗，图片直接以此尺寸训练（推荐与原图一致，如 640）</div>
+            <div class="hint">{{ taskType === 'obb' ? '旋转检测' : '检测' }}项目不滑窗，图片直接以此尺寸训练（推荐与原图一致，如 640）</div>
           </el-form-item>
         </template>
         <template v-else>
@@ -294,10 +296,10 @@
         <b>{{ result.stats?.with_ann || 0 }}</b> 张有标注，
         <b>{{ result.stats?.total_polygons || 0 }}</b> 个缺陷多边形
       </div>
-      <div style="color:#606266;margin-bottom:24px" v-else-if="taskType==='det'">
+      <div style="color:#606266;margin-bottom:24px" v-else-if="taskType==='det' || taskType==='obb'">
         共导入 <b>{{ result.stats?.total || 0 }}</b> 张图片，
         <b>{{ result.stats?.with_ann || 0 }}</b> 张有标注，
-        <b>{{ result.stats?.total_boxes || 0 }}</b> 个 bbox
+        <b>{{ result.stats?.total_boxes || 0 }}</b> 个 {{ taskType==='obb' ? '旋转框（OBB）' : 'bbox' }}
       </div>
       <div style="color:#606266;margin-bottom:24px" v-else>
         共导入 <b>{{ result.stats?.total || 0 }}</b> 张图片，
@@ -333,7 +335,7 @@ const router = useRouter()
 const step = ref(0)
 
 // 任务类型
-const taskType = ref<'seg' | 'det' | 'cls'>('seg')
+const taskType = ref<'seg' | 'det' | 'cls' | 'obb'>('seg')
 // 分类导入子模式
 const clsImportMode = ref<'folder' | 'xml'>('folder')
 // 分类文件夹模式：选目录后保留所有文件（含相对路径）
@@ -580,7 +582,8 @@ async function doImport() {
       })
       result.value = data
     } else {
-      // 检测：VOC 导入
+      // 检测 / 旋转检测：均走 VOC 导入（同一份 XML，标注存储格式相同；
+      // 区别仅在创建项目的 task_type，以及训练时是否走 prepare_obb_dataset）
       const mapping: Record<string, any> = {}
       for (const c of detClasses.value) {
         if (!c.name.trim()) continue
@@ -592,6 +595,7 @@ async function doImport() {
         return
       }
       fd.append('crop_size', String(cropSize.value))
+      fd.append('task_type', taskType.value)   // 'det' 或 'obb'
       fd.append('class_mapping_json', JSON.stringify(mapping))
       imgFiles.value.forEach(f => fd.append('images', f))
       xmlFiles.value.forEach(f => fd.append('xmls', f))

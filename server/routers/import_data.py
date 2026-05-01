@@ -262,13 +262,19 @@ async def import_voc_project(
     project_name: str = Form(...),
     description: str = Form(default=""),
     crop_size: int = Form(default=640),
+    task_type: str = Form(default="det"),   # 'det' 或 'obb'，标注存储格式相同（4 点 polygon）
     class_mapping_json: str = Form(...),  # JSON: {"panel": {"class_index": 0, "color": "#FF0000"}}
     images: List[UploadFile] = File(...),
     xmls: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
     """
-    执行目标检测项目导入：创建项目 (task_type='det') + 导入图片 + 转换 VOC bbox → 4点多边形
+    执行目标检测项目导入：创建项目 + 导入图片 + 转换 VOC bbox → 4点多边形
+
+    task_type:
+        - 'det': 普通目标检测，训练 YOLO det
+        - 'obb': 旋转目标检测，训练 YOLO OBB（标签由 minAreaRect 自动转旋转矩形；
+                即使源 bbox 是 axis-aligned，配合 degrees=180 增强模型也能学到角度）
 
     class_mapping_json 格式（key 是类别名，不是像素值）：
     {
@@ -276,6 +282,8 @@ async def import_voc_project(
         "defect": {"class_index": 1, "color": "#00FF00"}
     }
     """
+    if task_type not in ("det", "obb"):
+        raise HTTPException(status_code=400, detail="task_type 必须是 det 或 obb")
     # 解析类别映射
     try:
         class_mapping_raw = json.loads(class_mapping_json)
@@ -296,12 +304,13 @@ async def import_voc_project(
         name_to_index[cls_name] = ci
         class_defs[ci] = {"name": cls_name, "color": info.get("color", "#FF0000")}
 
-    # 1. 创建项目（task_type='det'）
+    # 1. 创建项目（task_type 由参数决定）
+    default_desc = "旋转目标检测项目" if task_type == "obb" else "目标检测项目"
     project = Project(
         name=project_name,
-        description=description or "目标检测项目",
-        task_type="det",
-        resize_h=crop_size,  # 检测项目不滑窗，resize=crop_size
+        description=description or default_desc,
+        task_type=task_type,
+        resize_h=crop_size,
         resize_w=crop_size,
         crop_size=crop_size,
         overlap=0.0,
@@ -442,7 +451,7 @@ async def import_voc_project(
     return {
         "project_id": project.id,
         "project_name": project.name,
-        "task_type": "det",
+        "task_type": task_type,
         "stats": stats,
     }
 
