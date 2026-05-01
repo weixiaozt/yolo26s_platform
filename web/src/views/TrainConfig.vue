@@ -312,9 +312,18 @@ onMounted(async () => {
     taskType.value = (proj.task_type || 'seg') as 'seg' | 'det' | 'cls' | 'obb'
     // 检测项目使用不同的默认模型和参数
     if (taskType.value === 'det') {
-      c.value.model_name = 'yolo26n.pt'  // 检测默认 nano
+      // 默认改 small：nano 召回弱，对工业/航拍小目标效果差
+      c.value.model_name = 'yolo26s.pt'
       c.value.use_morphology = false       // 检测不需要形态学
       c.value.train_ratio = 0.85
+      // det 不需要这些
+      c.value.copy_paste = 0    // 仅对 seg 有效，传了浪费
+      c.value.mixup = 0          // 对小目标 det 通常有害
+      c.value.degrees = 20       // HBB 框轴对齐，大角度旋转会让 bbox 膨胀，标签变脏
+      c.value.flipud = 0.5       // 上下翻转一般可保留
+      c.value.mosaic = 0.3       // 适中即可
+      c.value.epochs = 300       // 小数据多迭代
+      c.value.patience = 80
     } else if (taskType.value === 'cls') {
       c.value.model_name = 'yolo11s-cls.pt'  // 分类默认 small
       c.value.use_morphology = false
