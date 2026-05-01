@@ -37,10 +37,13 @@
         </div>
         <div class="hp-list">
           <div v-for="r in history" :key="r.id" :class="['hp-item',{active:selId===r.id}]" @click="selectRecord(r)">
-            <img :src="r.overlay_url" class="hp-thumb" loading="lazy" />
+            <img :src="r.overlay_url || r.original_url" class="hp-thumb" loading="lazy" />
             <div class="hp-info">
               <div class="hp-name">{{ r.filename }}</div>
-              <div :class="['hp-status', r.num_detections>0?'defect':'ok']">
+              <div v-if="r.task_type==='cls'" class="hp-status defect" :style="{color: clsColorOf(r)}">
+                {{ clsLabelOf(r) }}
+              </div>
+              <div v-else :class="['hp-status', r.num_detections>0?'defect':'ok']">
                 {{ r.num_detections>0 ? r.num_detections+' 缺陷' : '✓ OK' }}
               </div>
               <div class="hp-meta">{{ r.inference_time }}s · {{ r.device }}</div>
@@ -54,26 +57,34 @@
       <!-- 中间：大图查看器 -->
       <div class="viewer">
         <template v-if="current">
-          <!-- 视图切换 -->
+          <!-- 视图切换（cls 不需要） -->
           <div class="view-bar">
-            <el-radio-group v-model="viewMode" size="small">
+            <el-radio-group v-if="!isCls" v-model="viewMode" size="small">
               <el-radio-button label="overlay">检测结果</el-radio-button>
               <el-radio-button label="original">原图</el-radio-button>
               <el-radio-button label="mask">Mask</el-radio-button>
               <el-radio-button label="compare">同时显示</el-radio-button>
             </el-radio-group>
             <el-switch
-              v-if="current.overlay_morph_url"
+              v-if="!isCls && current.overlay_morph_url"
               v-model="showMorph"
               active-text="形态学视图"
               inactive-text="原图视图"
               size="small"
               style="margin-left:12px"
             />
+            <div v-if="isCls" class="cls-top1">
+              <span style="color:#909399;margin-right:4px">Top-1:</span>
+              <el-tag :color="clsColorOf(current)" effect="dark" disable-transitions>{{ clsTop1Name(current) }}</el-tag>
+              <b :style="{color:'#67C23A',marginLeft:'8px'}">{{ (clsTop1Conf(current)*100).toFixed(2) }}%</b>
+            </div>
             <div class="view-stats">
-              <b :style="{color:current.num_detections>0?'#F56C6C':'#67C23A'}">{{ current.num_detections }}</b> 缺陷
-              · {{ current.inference_time }}s
-              · {{ current.filename }}
+              <template v-if="isCls">{{ current.inference_time }}s · {{ current.filename }}</template>
+              <template v-else>
+                <b :style="{color:current.num_detections>0?'#F56C6C':'#67C23A'}">{{ current.num_detections }}</b> 缺陷
+                · {{ current.inference_time }}s
+                · {{ current.filename }}
+              </template>
               <span style="margin-left:12px;color:#aaa">滚轮缩放 · 拖拽移动 · 双击还原</span>
             </div>
           </div>
@@ -89,19 +100,36 @@
             <div class="cmp-cell" v-for="v in ['original','overlay','mask']" :key="v">
               <div class="cmp-label">{{ {original:'原图',overlay:'检测结果',mask:'Mask'}[v] }}</div>
               <div class="cmp-img-wrap" @wheel.prevent="e=>onWheelCmp(e,v)" @mousedown="e=>onDragStartCmp(e,v)" @dblclick="resetZoomCmp(v)">
-                <img :src="current[v+'_url']" class="zoom-img" :style="cmpStyles[v]" draggable="false" />
+                <img :src="(current as any)[v+'_url']" class="zoom-img" :style="cmpStyles[v]" draggable="false" />
               </div>
             </div>
           </div>
 
-          <!-- 检测详情 -->
-          <div v-if="current.detections.length>0" class="detail-bar">
+          <!-- 检测详情（seg / det） -->
+          <div v-if="!isCls && current.detections.length>0" class="detail-bar">
             <el-table :data="current.detections" stripe size="small" max-height="160" style="width:100%">
               <el-table-column type="index" label="#" width="45" />
               <el-table-column label="类别" width="90"><template #default="{row}"><el-tag size="small">{{ row.class_name || ('C' + row.class_id) }}</el-tag></template></el-table-column>
               <el-table-column label="置信度" width="80"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(1)}}%</b></template></el-table-column>
-              <el-table-column label="位置"><template #default="{row}">({{row.bbox.x1}},{{row.bbox.y1}})→({{row.bbox.x2}},{{row.bbox.y2}})</template></el-table-column>
-              <el-table-column label="尺寸" width="90"><template #default="{row}">{{row.bbox.x2-row.bbox.x1}}×{{row.bbox.y2-row.bbox.y1}}</template></el-table-column>
+              <el-table-column label="位置"><template #default="{row}"><span v-if="row.bbox">({{row.bbox.x1}},{{row.bbox.y1}})→({{row.bbox.x2}},{{row.bbox.y2}})</span><span v-else>—</span></template></el-table-column>
+              <el-table-column label="尺寸" width="90"><template #default="{row}"><span v-if="row.bbox">{{row.bbox.x2-row.bbox.x1}}×{{row.bbox.y2-row.bbox.y1}}</span><span v-else>—</span></template></el-table-column>
+            </el-table>
+          </div>
+
+          <!-- 分类 Top-5 -->
+          <div v-else-if="isCls && current.detections.length>0" class="detail-bar">
+            <el-table :data="current.detections" stripe size="small" max-height="200" style="width:100%">
+              <el-table-column type="index" label="Rank" width="60">
+                <template #default="{$index}">Top-{{ $index + 1 }}</template>
+              </el-table-column>
+              <el-table-column label="类别" width="120"><template #default="{row}"><el-tag size="small">{{ row.class_name || ('C' + row.class_id) }}</el-tag></template></el-table-column>
+              <el-table-column label="置信度" width="100"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(2)}}%</b></template></el-table-column>
+              <el-table-column label="概率分布">
+                <template #default="{row}">
+                  <el-progress :percentage="+(row.confidence*100).toFixed(1)" :stroke-width="14"
+                    :color="row.confidence>0.5?'#67C23A':'#E6A23C'" :show-text="false" />
+                </template>
+              </el-table-column>
             </el-table>
           </div>
         </template>
@@ -138,8 +166,8 @@ const router = useRouter()
 // URLs already include /api prefix
 
 interface ModelInfo { task_id:number; model_format:string; label:string; model_path:string }
-interface Det { class_id:number; class_name?:string; confidence:number; bbox:{x1:number;y1:number;x2:number;y2:number} }
-interface Rec { id:number; filename:string; num_detections:number; inference_time:number; detections:Det[]; original_url:string; overlay_url:string; overlay_morph_url?:string; mask_url:string; device:string; created_at:string|null }
+interface Det { class_id:number; class_name?:string; confidence:number; bbox?:{x1:number;y1:number;x2:number;y2:number} }
+interface Rec { id:number; filename:string; num_detections:number; inference_time:number; detections:Det[]; original_url:string; overlay_url:string; overlay_morph_url?:string|null; mask_url:string; device:string; created_at:string|null; task_type?:string }
 
 interface DeviceInfo { id:string; name:string; available:boolean }
 
@@ -158,8 +186,20 @@ const showMorph = ref(false)
 const history = ref<Rec[]>([])
 const selId = ref<number|null>(null)
 const current = computed(() => history.value.find(r => r.id === selId.value) || null)
+
+// 是否分类任务（兜底：detections 没 bbox 也判为 cls）
+const isCls = computed(() => {
+  const r = current.value
+  if (!r) return false
+  if (r.task_type === 'cls') return true
+  const dets = r.detections || []
+  return dets.length > 0 && !dets[0].bbox
+})
+
 const currentSrc = computed(() => {
   if (!current.value) return ''
+  // cls 只有原图
+  if (isCls.value) return current.value.original_url
   const mode = viewMode.value === 'compare' ? 'overlay' : viewMode.value
   // 检测结果模式：如果打开形态学开关且有形态学图，显示形态学版本
   if (mode === 'overlay' && showMorph.value && current.value.overlay_morph_url) {
@@ -167,6 +207,29 @@ const currentSrc = computed(() => {
   }
   return (current.value as any)[mode + '_url']
 })
+
+// ---- cls 工具函数 ----
+function clsTop1(r: Rec | null): Det | null {
+  if (!r || !r.detections || r.detections.length === 0) return null
+  return r.detections[0]
+}
+function clsTop1Name(r: Rec | null): string {
+  const d = clsTop1(r); if (!d) return '-'
+  return d.class_name || ('C' + d.class_id)
+}
+function clsTop1Conf(r: Rec | null): number {
+  const d = clsTop1(r); return d ? d.confidence : 0
+}
+function clsLabelOf(r: Rec): string {
+  const d = clsTop1(r); if (!d) return '-'
+  return `${d.class_name || ('C' + d.class_id)} ${(d.confidence*100).toFixed(1)}%`
+}
+// 简单按 class_id 哈希取色
+const _clsColors = ['#F56C6C','#67C23A','#E6A23C','#409EFF','#9254DE','#13C2C2','#FA541C','#A0D911']
+function clsColorOf(r: Rec | null): string {
+  const d = clsTop1(r); if (!d) return '#909399'
+  return _clsColors[(d.class_id ?? 0) % _clsColors.length]
+}
 
 const selModel = computed(() => selModelIdx.value !== null ? models.value[selModelIdx.value] : null)
 
@@ -244,6 +307,9 @@ function selectRecord(r: Rec) {
   selId.value = r.id
   resetZoom()
   for (const k of ['original','overlay','mask']) cmpZoom[k] = {z:1,x:0,y:0}
+  // cls 强制单图模式（即使 viewMode 是别的，currentSrc 也回退到 original_url）
+  const cls = r.task_type === 'cls' || (r.detections && r.detections.length > 0 && !r.detections[0].bbox)
+  if (cls && viewMode.value === 'compare') viewMode.value = 'original'
 }
 
 // ---- 推断 ----
@@ -323,8 +389,9 @@ async function clearHistory() {
 
 /* 查看器 */
 .viewer { flex:1; display:flex; flex-direction:column; overflow:hidden; }
-.view-bar { display:flex; justify-content:space-between; align-items:center; padding:8px 14px; background:#fff; border-bottom:1px solid #e4e7ed; flex-shrink:0; }
+.view-bar { display:flex; justify-content:space-between; align-items:center; padding:8px 14px; background:#fff; border-bottom:1px solid #e4e7ed; flex-shrink:0; gap:12px; flex-wrap:wrap; }
 .view-stats { font-size:12px; color:#909399; }
+.cls-top1 { display:flex; align-items:center; font-size:13px; font-weight:600; color:#303133; }
 
 /* 单图缩放容器 */
 .img-container { flex:1; overflow:hidden; background:#111; display:flex; justify-content:center; align-items:center; user-select:none; }

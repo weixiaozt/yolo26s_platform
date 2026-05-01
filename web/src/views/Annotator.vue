@@ -114,7 +114,7 @@ const annotations = ref<AnnotationData[]>([])
 const selectedClassId = ref<number>(0)
 const selectedAnnIdx = ref(-1)
 const currentTool = ref('polygon')
-const brushSize = ref(10)
+const brushSize = ref(2)
 const isDrawing = ref(false)
 const saving = ref(false)
 const saveState = ref<'idle'|'pending'|'saving'|'saved'|'error'>('idle')
@@ -426,7 +426,7 @@ function renderAnnotations(){
     const c=clsColor(ann.class_id)
     const pts=ann.polygon.map(p=>({x:p.x*W,y:p.y*H}))
     const poly=new fabric.Polygon(pts,{
-      fill:c+'55',stroke:c,strokeWidth:1.5,
+      fill:c+'55',stroke:c,strokeWidth:0.75,
       selectable:isSelectTool,
       hasControls:false,hasBorders:false,
       lockRotation:true,lockScalingX:true,lockScalingY:true,
@@ -521,7 +521,7 @@ function drawCirclePrev(p:{x:number;y:number}){
   if(!canvas||!circleStart)return;cleanTmp()
   const c=clsColor(selectedClassId.value)
   const r=Math.sqrt((p.x-circleStart.x)**2+(p.y-circleStart.y)**2)
-  const ci=new fabric.Circle({left:circleStart.x-r,top:circleStart.y-r,radius:r,fill:c+'33',stroke:c,strokeWidth:2,selectable:false,evented:false})
+  const ci=new fabric.Circle({left:circleStart.x-r,top:circleStart.y-r,radius:r,fill:c+'33',stroke:c,strokeWidth:1,selectable:false,evented:false})
   ;(ci as any)._tmp=true;canvas.add(ci);canvas.requestRenderAll()
 }
 function finishCircle(p:{x:number;y:number}){
@@ -539,7 +539,7 @@ function drawRectPrev(p:{x:number;y:number}){
   const c=clsColor(selectedClassId.value)
   const x=Math.min(rectStart.x,p.x),y=Math.min(rectStart.y,p.y)
   const w=Math.abs(p.x-rectStart.x),h=Math.abs(p.y-rectStart.y)
-  const r=new fabric.Rect({left:x,top:y,width:w,height:h,fill:c+'33',stroke:c,strokeWidth:2,selectable:false,evented:false})
+  const r=new fabric.Rect({left:x,top:y,width:w,height:h,fill:c+'33',stroke:c,strokeWidth:1,selectable:false,evented:false})
   ;(r as any)._tmp=true;canvas.add(r);canvas.requestRenderAll()
 }
 function finishRect(p:{x:number;y:number}){
@@ -567,7 +567,7 @@ function finishEraser(){
 function drawBoxRect(p:{x:number;y:number}){
   if(!canvas||!boxEraserStart)return;cleanTmp()
   const x=Math.min(boxEraserStart.x,p.x),y=Math.min(boxEraserStart.y,p.y)
-  const r=new fabric.Rect({left:x,top:y,width:Math.abs(p.x-boxEraserStart.x),height:Math.abs(p.y-boxEraserStart.y),fill:'rgba(255,0,0,0.15)',stroke:'#F44',strokeWidth:1,strokeDashArray:[4,4],selectable:false,evented:false})
+  const r=new fabric.Rect({left:x,top:y,width:Math.abs(p.x-boxEraserStart.x),height:Math.abs(p.y-boxEraserStart.y),fill:'rgba(255,0,0,0.15)',stroke:'#F44',strokeWidth:0.5,strokeDashArray:[4,4],selectable:false,evented:false})
   ;(r as any)._tmp=true;canvas.add(r);canvas.requestRenderAll()
 }
 function finishBoxEraser(){
@@ -635,7 +635,7 @@ function addAnn(polygon:Point[]){
 }
 function drawDotFixed(x:number,y:number){
   if(!canvas)return;const c=clsColor(selectedClassId.value)
-  const d=new fabric.Circle({left:x-4,top:y-4,radius:4,fill:'#FFF',stroke:c,strokeWidth:2,selectable:false,evented:false})
+  const d=new fabric.Circle({left:x-2,top:y-2,radius:2,fill:'#FFF',stroke:c,strokeWidth:1,selectable:false,evented:false})
   ;(d as any)._tmp=true;canvas.add(d);canvas.requestRenderAll()
 }
 function drawDotAt(p:{x:number;y:number},color:string){
@@ -647,7 +647,7 @@ function drawTmpLine(p:{x:number;y:number}){
   if(!canvas||drawingPoints.length===0)return
   canvas.getObjects().filter(o=>(o as any)._tl).forEach(o=>canvas!.remove(o))
   const last=drawingPoints[drawingPoints.length-1],c=clsColor(selectedClassId.value)
-  const ln=new fabric.Line([last.x,last.y,p.x,p.y],{stroke:c,strokeWidth:1.5,strokeDashArray:[5,3],selectable:false,evented:false})
+  const ln=new fabric.Line([last.x,last.y,p.x,p.y],{stroke:c,strokeWidth:0.75,strokeDashArray:[5,3],selectable:false,evented:false})
   ;(ln as any)._tmp=true;(ln as any)._tl=true;canvas.add(ln);canvas.requestRenderAll()
 }
 function cancelDrawing(){isDrawing.value=false;drawingPoints=[];isBrushing=false;brushPts=[];isErasing=false;eraserPts=[];circleStart=null;rectStart=null;boxEraserStart=null;cleanTmp()}
@@ -666,7 +666,7 @@ function highlightSelected(){
   canvas.getObjects().forEach(o=>{
     if((o as any)._ann){
       const i=(o as any)._idx
-      o.set({strokeWidth:i===idx?3:1.5,opacity:idx<0?1:(i===idx?1:0.7)})
+      o.set({strokeWidth:i===idx?1.5:0.75,opacity:idx<0?1:(i===idx?1:0.7)})
     }
   })
   canvas.requestRenderAll()
@@ -681,8 +681,8 @@ function showVertexHandles(idx:number){
   const W=currentImage.value.width,H=currentImage.value.height
   ann.polygon.forEach((p,i)=>{
     const handle=new fabric.Circle({
-      left:p.x*W-6,top:p.y*H-6,radius:6,
-      fill:'#fff',stroke:'#409EFF',strokeWidth:2,
+      left:p.x*W-3,top:p.y*H-3,radius:3,
+      fill:'#fff',stroke:'#409EFF',strokeWidth:1,
       hasControls:false,hasBorders:false,
       selectable:true,evented:true,
       hoverCursor:'move',
@@ -699,7 +699,7 @@ function showVertexHandles(idx:number){
       // 第一次移动才入栈，避免单击也 push undo
       if(firstMove){pushUndo();firstMove=false}
       const W2=currentImage.value.width,H2=currentImage.value.height
-      const cx=(handle.left||0)+6,cy=(handle.top||0)+6
+      const cx=(handle.left||0)+3,cy=(handle.top||0)+3
       // clamp 到画布范围（防止越界后端 422）
       const nx=Math.max(0,Math.min(1,cx/W2))
       const ny=Math.max(0,Math.min(1,cy/H2))

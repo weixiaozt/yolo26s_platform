@@ -30,28 +30,41 @@
     </div>
 
     <div class="main">
-      <!-- 缩略图网格 6×6 -->
-      <div class="grid-container" ref="gridRef" @scroll="onScroll">
-        <div v-if="items.length === 0 && !loading" class="empty">
-          <el-empty :description="filter === 'all' ? '该项目暂无图片' : '此筛选下无图片'" />
-        </div>
-        <div class="grid">
-          <div
-            v-for="img in items"
-            :key="img.id"
-            :class="['cell', { selected: selected.has(img.id) }]"
-            :style="{ borderColor: cellBorderColor(img) }"
-            @click="onCellClick(img, $event)"
-          >
-            <img :src="thumbUrl(img.id)" loading="lazy" />
-            <div class="cell-tag" v-if="img.class_id" :style="{ background: classColor(img.class_id) }">
-              {{ classShortName(img.class_id) }}
+      <!-- 缩略图网格 6×6 + 底部分页栏 -->
+      <div class="grid-wrap">
+        <div class="grid-container" ref="gridRef" v-loading="loading">
+          <div v-if="items.length === 0 && !loading" class="empty">
+            <el-empty :description="filter === 'all' ? '该项目暂无图片' : '此筛选下无图片'" />
+          </div>
+          <div class="grid">
+            <div
+              v-for="img in items"
+              :key="img.id"
+              :class="['cell', { selected: selected.has(img.id) }]"
+              :style="{ borderColor: cellBorderColor(img) }"
+              @click="onCellClick(img, $event)"
+            >
+              <img :src="thumbUrl(img.id)" loading="lazy" />
+              <div class="cell-tag" v-if="img.class_id" :style="{ background: classColor(img.class_id) }">
+                {{ classShortName(img.class_id) }}
+              </div>
+              <div class="cell-id">#{{ img.id }}</div>
             </div>
-            <div class="cell-id">#{{ img.id }}</div>
           </div>
         </div>
-        <div v-if="loading" class="loading-row">加载中...</div>
-        <div v-else-if="!hasMore && items.length > 0" class="loading-row">— 已加载全部 —</div>
+        <!-- 底部分页栏 -->
+        <div class="pagination-bar" v-if="totalItems > 0">
+          <el-pagination
+            v-model:current-page="page"
+            :page-size="pageSize"
+            :total="totalItems"
+            layout="total, prev, pager, next, jumper"
+            :pager-count="9"
+            background
+            @current-change="onPageChange"
+          />
+          <span class="page-hint">每页 {{ pageSize }} 张 · 共 {{ Math.ceil(totalItems / pageSize) }} 页</span>
+        </div>
       </div>
 
       <!-- 右侧类别面板 -->
@@ -109,8 +122,8 @@ const lastClickedId = ref<number | null>(null)
 const filter = ref<'all' | 'unlabeled' | 'labeled'>('all')
 const loading = ref(false)
 const page = ref(1)
-const pageSize = 60
-const hasMore = ref(true)
+const pageSize = 36   // 6 × 6
+const totalItems = ref(0)
 const hoveredClass = ref<number | null>(null)
 
 const saveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
@@ -155,16 +168,17 @@ async function loadProject() {
   }
 }
 
-async function loadPage(append = false) {
+async function loadPage() {
   if (loading.value) return
   loading.value = true
   try {
     const params: any = { page: page.value, page_size: pageSize }
     if (filter.value !== 'all') params.status = filter.value
     const { data } = await imageApi.list(parseInt(props.projectId), params)
-    if (append) items.value.push(...data.items)
-    else items.value = data.items
-    hasMore.value = data.items.length === pageSize
+    items.value = data.items
+    totalItems.value = data.total
+    // 滚到顶
+    if (gridRef.value) gridRef.value.scrollTop = 0
   } finally {
     loading.value = false
   }
@@ -172,25 +186,15 @@ async function loadPage(append = false) {
 
 async function reload() {
   page.value = 1
-  hasMore.value = true
   selected.value.clear()
-  await loadPage(false)
-  // 重新读项目统计
+  await loadPage()
   await loadProject()
 }
 
-async function loadMore() {
-  if (!hasMore.value || loading.value) return
-  page.value += 1
-  await loadPage(true)
-}
-
-function onScroll() {
-  if (!gridRef.value) return
-  const el = gridRef.value
-  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
-    loadMore()
-  }
+async function onPageChange(p: number) {
+  page.value = p
+  selected.value.clear()
+  await loadPage()
 }
 
 function onCellClick(img: ImageInfo, e: MouseEvent) {
@@ -283,7 +287,7 @@ function goBack() { router.push(`/project/${props.projectId}`) }
 onMounted(async () => {
   await loadProject()
   if (project.value?.task_type === 'cls') {
-    await loadPage(false)
+    await loadPage()
   }
   rootRef.value?.focus()
 })
@@ -303,13 +307,45 @@ onBeforeUnmount(() => {})
 
 .main { display: flex; flex: 1; overflow: hidden; }
 
+.grid-wrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .grid-container { flex: 1; overflow-y: auto; padding: 12px; }
 .empty { padding: 60px 0; }
 .grid {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
+  grid-auto-rows: 1fr;
   gap: 8px;
 }
+
+.pagination-bar {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 12px;
+  background: #2d2d2d;
+  border-top: 1px solid #444;
+  flex-shrink: 0;
+}
+.page-hint { font-size: 12px; color: #888; }
+/* element-plus 分页器深色适配 */
+.pagination-bar :deep(.el-pagination) { color: #ccc; }
+.pagination-bar :deep(.el-pagination button),
+.pagination-bar :deep(.el-pager li) {
+  background-color: #3a3a3a !important;
+  color: #ccc !important;
+}
+.pagination-bar :deep(.el-pager li.is-active) {
+  background-color: #409EFF !important;
+  color: #fff !important;
+}
+.pagination-bar :deep(.el-pagination__total),
+.pagination-bar :deep(.el-pagination__jump) { color: #aaa; }
+.pagination-bar :deep(.el-pagination__editor.el-input .el-input__wrapper) {
+  background-color: #3a3a3a;
+  box-shadow: 0 0 0 1px #555 inset;
+}
+.pagination-bar :deep(.el-pagination__editor.el-input .el-input__inner) { color: #ddd; }
 .cell {
   position: relative;
   aspect-ratio: 1 / 1;

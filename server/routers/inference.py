@@ -154,10 +154,19 @@ def _run_cls_inference(model, img_array, content, file, project_id, task_id, dev
         "id": record.id,
         "task_type": "cls",
         "filename": record.filename,
+        "device": record.device,
         "inference_time": record.inference_time,
+        "num_detections": record.num_detections,
+        # 与 seg/det 保持兼容：detections 里就是 top5（无 bbox）
+        "detections": top5,
         "top1": {"class_id": top1_id, "class_name": top1_name, "confidence": round(top1_conf, 4)},
         "top5": top5,
         "original_url": record.original_path,
+        # cls 没有这些图，保持字段存在以兼容前端类型
+        "overlay_url": "",
+        "overlay_morph_url": None,
+        "mask_url": "",
+        "created_at": record.created_at.isoformat() if record.created_at else None,
     }
 
 
@@ -275,14 +284,17 @@ async def run_inference(
 
     return {
         "id": record.id,
+        "task_type": task_type,
         "num_detections": record.num_detections,
         "inference_time": record.inference_time,
         "detections": detections,
         "filename": record.filename,
+        "device": record.device,
         "original_url": record.original_path,
         "overlay_url": record.overlay_path,
         "overlay_morph_url": f"{url_pfx}/{rid}_overlay_morph.png" if result.get("overlay_morph") is not None else None,
         "mask_url": record.mask_path,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
     }
 
 
@@ -311,9 +323,33 @@ def list_history(project_id: int = Query(default=0), page: int = Query(default=1
                 d["class_name"] = names.get(cid, f"C{cid}")
         return dets
 
+    # task_type 缓存（按 task_id 查 TrainTask.config）
+    tt_cache: dict = {}
+    def get_task_type(tid: int) -> str:
+        if tid in tt_cache:
+            return tt_cache[tid]
+        tt = "seg"
+        if tid:
+            t = db.query(TrainTask).filter(TrainTask.id == tid).first()
+            if t and t.config:
+                tt = t.config.get("task_type", "seg")
+        tt_cache[tid] = tt
+        return tt
+
+    def infer_task_type(r) -> str:
+        """优先从 TrainTask.config 取；取不到时根据 detections 是否含 bbox 兜底判断"""
+        tt = get_task_type(r.task_id) if r.task_id else None
+        if tt:
+            return tt
+        dets = r.detections or []
+        if dets and "bbox" not in dets[0]:
+            return "cls"
+        return "seg"
+
     return {"total": total, "page": page, "page_size": page_size, "items": [
         {"id": r.id, "filename": r.filename, "num_detections": r.num_detections,
          "inference_time": r.inference_time, "device": r.device,
+         "task_type": infer_task_type(r),
          "detections": enrich(r.detections or [], r.project_id),
          "original_url": r.original_path or "", "overlay_url": r.overlay_path or "",
          "overlay_morph_url": r.overlay_morph_path,
