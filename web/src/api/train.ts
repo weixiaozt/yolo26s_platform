@@ -14,6 +14,7 @@ export interface TrainTask {
   started_at: string | null
   finished_at: string | null
   created_at: string
+  config?: Record<string, any> | null   // 训练时使用的完整参数（model_name/epochs/lr0/...）
 }
 
 export interface EpochLog {

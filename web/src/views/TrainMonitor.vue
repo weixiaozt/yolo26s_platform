@@ -58,6 +58,48 @@
         <pre style="white-space:pre-wrap;font-size:12px;max-height:200px;overflow:auto">{{ selectedTask.error_message }}</pre>
       </el-alert>
 
+      <!-- 训练参数（点击展开/收起） -->
+      <el-card v-if="selectedTask?.config" shadow="never" style="margin-bottom:20px">
+        <template #header>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="font-weight:600">训练参数 — {{ selectedTask.task_name }}</span>
+            <div style="display:flex;gap:8px">
+              <el-button text size="small" @click="copyConfig">
+                <el-icon><DocumentCopy /></el-icon> 复制 JSON
+              </el-button>
+              <el-button text size="small" @click="paramsExpanded = !paramsExpanded">
+                {{ paramsExpanded ? '收起' : '展开' }}
+              </el-button>
+            </div>
+          </div>
+        </template>
+        <div v-show="paramsExpanded">
+          <div v-for="group in paramGroups" :key="group.title" class="param-group">
+            <div class="param-group-title">{{ group.title }}</div>
+            <div class="param-grid">
+              <div
+                v-for="item in group.items.filter(i => hasValue(i.key))"
+                :key="item.key"
+                class="param-item"
+              >
+                <div class="param-label">{{ item.label }}</div>
+                <div class="param-value" :title="item.tip || ''">{{ formatValue(item.key, item.fmt) }}</div>
+                <div v-if="item.tip" class="param-tip">{{ item.tip }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- 收起时只显示关键 4 项 -->
+        <div v-show="!paramsExpanded" class="param-summary">
+          <span class="ps-item"><b>模型:</b> {{ cfg.model_name || '-' }}</span>
+          <span class="ps-item"><b>Epochs:</b> {{ cfg.epochs || '-' }}</span>
+          <span class="ps-item"><b>BatchSize:</b> {{ cfg.batch_size || '-' }}</span>
+          <span class="ps-item"><b>lr0:</b> {{ cfg.lr0 ?? '-' }}</span>
+          <span class="ps-item"><b>degrees:</b> {{ cfg.degrees ?? '-' }}</span>
+          <span class="ps-item"><b>device:</b> {{ cfg.device ?? '-' }}</span>
+        </div>
+      </el-card>
+
       <!-- Loss 曲线 -->
       <el-card shadow="never" style="margin-bottom:20px">
         <template #header>
@@ -130,6 +172,113 @@ const epochs = ref<EpochLog[]>([])
 let pollTimer: any = null
 
 const selectedTask = computed(() => tasks.value.find(t => t.id === selectedTaskId.value))
+
+// ========== 训练参数展示 ==========
+const paramsExpanded = ref(true)
+const cfg = computed<Record<string, any>>(() => (selectedTask.value?.config || {}) as any)
+
+interface ParamItem { key: string; label: string; tip?: string; fmt?: 'pct' | 'fix2' | 'fix4' | 'json' }
+interface ParamGroup { title: string; items: ParamItem[] }
+
+const paramGroups: ParamGroup[] = [
+  {
+    title: '基本参数',
+    items: [
+      { key: 'task_type',     label: '任务类型',  tip: 'seg=分割 / det=检测 / cls=分类 / obb=旋转检测' },
+      { key: 'model_name',    label: '模型',      tip: '权重文件名（如 yolo11s-obb.pt）' },
+      { key: 'epochs',        label: 'Epochs',    tip: '训练总轮数' },
+      { key: 'batch_size',    label: 'Batch Size',tip: '一次梯度更新的图片数' },
+      { key: 'patience',      label: 'Patience',  tip: '早停容忍轮数（连续无提升）' },
+      { key: 'device',        label: '设备',      tip: '0=GPU0 / cpu' },
+      { key: 'train_mode',    label: '训练模式',  tip: 'scratch=从头 / finetune=继承' },
+      { key: 'resume_from_task_id', label: '继承自', tip: '继承训练时来源任务 ID' },
+      { key: 'train_ratio',   label: '训练集占比' },
+    ],
+  },
+  {
+    title: '学习率',
+    items: [
+      { key: 'lr0',             label: '初始学习率 lr0' },
+      { key: 'lrf',             label: '终末学习率 lrf', tip: '相对 lr0 的倍数；最终 lr = lr0 × lrf' },
+      { key: 'momentum',        label: 'Momentum' },
+      { key: 'weight_decay',    label: 'Weight Decay' },
+      { key: 'warmup_epochs',   label: 'Warmup Epochs' },
+      { key: 'warmup_momentum', label: 'Warmup Momentum' },
+    ],
+  },
+  {
+    title: '颜色增广',
+    items: [
+      { key: 'hsv_h', label: 'HSV-H (色调)' },
+      { key: 'hsv_s', label: 'HSV-S (饱和度)' },
+      { key: 'hsv_v', label: 'HSV-V (亮度)' },
+    ],
+  },
+  {
+    title: '几何增广',
+    items: [
+      { key: 'degrees',   label: '旋转角度 (°)', tip: 'OBB 任务通常 180，HBB 任务建议 ≤ 30' },
+      { key: 'translate', label: '平移比例' },
+      { key: 'scale',     label: '缩放范围' },
+      { key: 'shear',     label: '剪切角度 (°)' },
+      { key: 'flipud',    label: '上下翻转概率' },
+      { key: 'fliplr',    label: '左右翻转概率' },
+    ],
+  },
+  {
+    title: '高级增广',
+    items: [
+      { key: 'mosaic',       label: 'Mosaic',      tip: '4 图拼接增强概率' },
+      { key: 'mixup',        label: 'Mixup',       tip: '图像混叠概率' },
+      { key: 'copy_paste',   label: 'Copy-Paste',  tip: '仅 seg/obb 有效' },
+      { key: 'erasing',      label: 'Random Erasing' },
+      { key: 'close_mosaic', label: '末尾关闭 Mosaic 轮数' },
+    ],
+  },
+  {
+    title: '形态学预处理（仅 seg）',
+    items: [
+      { key: 'use_morphology',     label: '启用形态学' },
+      { key: 'dilate_kernel',      label: '膨胀核' },
+      { key: 'erode_kernel',       label: '腐蚀核' },
+      { key: 'mask_dilate_kernel', label: 'Mask 膨胀核' },
+    ],
+  },
+  {
+    title: '数据集预处理',
+    items: [
+      { key: 'resize_h',          label: 'Resize H' },
+      { key: 'resize_w',          label: 'Resize W' },
+      { key: 'crop_size',         label: '切割尺寸' },
+      { key: 'overlap',           label: '滑窗重叠率' },
+      { key: 'oversample_factor', label: '过采样倍数' },
+    ],
+  },
+]
+
+function hasValue(k: string): boolean {
+  const v = cfg.value[k]
+  return v !== undefined && v !== null && v !== ''
+}
+function formatValue(k: string, fmt?: string): string {
+  const v = cfg.value[k]
+  if (v === undefined || v === null) return '-'
+  if (typeof v === 'boolean') return v ? '是' : '否'
+  if (Array.isArray(v)) return JSON.stringify(v)
+  if (typeof v === 'object') return JSON.stringify(v)
+  if (fmt === 'pct' && typeof v === 'number') return (v * 100).toFixed(2) + '%'
+  if (fmt === 'fix2' && typeof v === 'number') return v.toFixed(2)
+  if (fmt === 'fix4' && typeof v === 'number') return v.toFixed(4)
+  return String(v)
+}
+async function copyConfig() {
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(cfg.value, null, 2))
+    ElMessage.success('训练参数 JSON 已复制到剪贴板')
+  } catch {
+    ElMessage.warning('复制失败，请手动选择文本')
+  }
+}
 
 // Chart refs
 const chartBoxLoss = ref<HTMLElement>()
@@ -322,5 +471,59 @@ window.addEventListener('resize', () => { charts.forEach(c => c.resize()) })
 pre {
   margin: 0;
   font-family: Consolas, monospace;
+}
+
+/* 训练参数展示 */
+.param-group {
+  margin-bottom: 18px;
+}
+.param-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  border-left: 3px solid #409EFF;
+  padding-left: 8px;
+  margin-bottom: 10px;
+}
+.param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+.param-item {
+  background: #fafbfc;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.param-label {
+  font-size: 11px;
+  color: #909399;
+  margin-bottom: 2px;
+}
+.param-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  word-break: break-all;
+}
+.param-tip {
+  font-size: 10px;
+  color: #c0c4cc;
+  margin-top: 2px;
+  line-height: 1.3;
+}
+.param-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 13px;
+  color: #606266;
+}
+.ps-item b {
+  color: #909399;
+  font-weight: normal;
+  margin-right: 4px;
 }
 </style>
