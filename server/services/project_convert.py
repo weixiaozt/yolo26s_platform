@@ -2,13 +2,18 @@
 """
 项目任务类型转换
 ================
-把现有项目的 task_type 在 seg / det 之间互转：
+把现有项目的 task_type 在 seg / det / obb 之间互转：
   - mode='inplace': 原地修改（保留同一个项目，只改 task_type）
   - mode='copy':    复制为新项目（保留原项目）
 
 无论哪种模式，标注数据本身不需要修改：
-  平台标注统一以 polygon JSON 存储，det 模式下是 4 点矩形，
-  对 seg 训练同样是合法多边形（只是边界规整）。
+  平台标注统一以 polygon JSON 存储。
+  - seg 训练：用 polygon 生成 mask
+  - det 训练：取 polygon 外接水平矩形作 bbox
+  - obb 训练：取 polygon 最小外接旋转矩形作为 4 角点 OBB（cv2.minAreaRect）
+
+  注：seg ↔ obb 转换最有价值（多边形→旋转矩形保留角度信息）；
+      det → obb 因为原本只有水平框，转后 OBB 全是 0°，等同 det。
 """
 
 import shutil
@@ -70,8 +75,8 @@ def convert_project_task_type(
             "annotation_count": int,
         }
     """
-    if target_type not in ("seg", "det"):
-        raise ValueError(f"target_type 必须是 seg 或 det，got: {target_type}")
+    if target_type not in ("seg", "det", "obb"):
+        raise ValueError(f"target_type 必须是 seg/det/obb，got: {target_type}")
     if mode not in ("inplace", "copy"):
         raise ValueError(f"mode 必须是 inplace 或 copy，got: {mode}")
 

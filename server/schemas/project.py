@@ -20,7 +20,7 @@ class DefectClassOut(DefectClassCreate):
 class ProjectCreate(BaseModel):
     name: str = Field(max_length=200)
     description: Optional[str] = None
-    task_type: str = Field(default="seg", pattern=r"^(seg|det|cls)$", description="任务类型: seg=分割, det=目标检测, cls=图像分类")
+    task_type: str = Field(default="seg", pattern=r"^(seg|det|cls|obb)$", description="任务类型: seg=分割, det=目标检测, cls=图像分类, obb=旋转目标检测")
     resize_h: int = Field(default=2048, ge=640)
     resize_w: int = Field(default=2048, ge=640)
     crop_size: int = Field(default=640, ge=320, le=8192)

@@ -314,6 +314,25 @@ async function handleCreate() {
     ElMessage.success('项目创建成功')
     showCreateDialog.value = false
     loadProjects()
+  } catch (e: any) {
+    // FastAPI 错误：detail 可能是字符串，也可能是 pydantic 验证错误数组
+    let msg = '创建失败'
+    const d = e?.response?.data?.detail
+    if (typeof d === 'string') {
+      msg = d
+    } else if (Array.isArray(d) && d.length) {
+      msg = d.map((it: any) => `${(it.loc || []).join('.')}: ${it.msg}`).join('；')
+    } else if (e?.message) {
+      msg = e.message
+    }
+    // 错误信息显示长一点 + 手动关闭，避免 422 文本一闪而过看不清
+    ElMessage({
+      type: 'error',
+      message: `项目创建失败：${msg}`,
+      duration: 0,        // 0 = 不自动关闭
+      showClose: true,
+    })
+    console.error('[handleCreate]', e?.response?.status, e?.response?.data, e)
   } finally {
     creating.value = false
   }

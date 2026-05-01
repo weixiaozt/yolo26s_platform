@@ -66,30 +66,30 @@
             <el-form-item label="模型尺寸">
               <el-select v-model="c.model_name" style="width:100%">
                 <template v-if="taskType === 'cls'">
-                  <el-option label="Nano  — 最快，~1.5M 参数（推荐小数据）" value="yolo11n-cls.pt" />
-                  <el-option label="Small — 均衡，~5M 参数" value="yolo11s-cls.pt" />
-                  <el-option label="Medium — 更精准，~10M 参数" value="yolo11m-cls.pt" />
-                  <el-option label="Large — 高精度，~13M 参数" value="yolo11l-cls.pt" />
+                  <el-option label="yolo11n-cls.pt · Nano — 最快，~1.5M 参数（推荐小数据）" value="yolo11n-cls.pt" />
+                  <el-option label="yolo11s-cls.pt · Small — 均衡，~5M 参数" value="yolo11s-cls.pt" />
+                  <el-option label="yolo11m-cls.pt · Medium — 更精准，~10M 参数" value="yolo11m-cls.pt" />
+                  <el-option label="yolo11l-cls.pt · Large — 高精度，~13M 参数" value="yolo11l-cls.pt" />
                 </template>
                 <template v-else-if="taskType === 'det'">
-                  <el-option label="Nano  — 最快，~3M 参数（推荐小数据）" value="yolo26n.pt" />
-                  <el-option label="Small — 均衡，~22M 参数" value="yolo26s.pt" />
-                  <el-option label="Medium — 更精准，~38M 参数" value="yolo26m.pt" />
-                  <el-option label="Large — 高精度，~58M 参数" value="yolo26l.pt" />
+                  <el-option label="yolo26n.pt · Nano — 最快，~3M 参数（推荐小数据）" value="yolo26n.pt" />
+                  <el-option label="yolo26s.pt · Small — 均衡，~22M 参数" value="yolo26s.pt" />
+                  <el-option label="yolo26m.pt · Medium — 更精准，~38M 参数" value="yolo26m.pt" />
+                  <el-option label="yolo26l.pt · Large — 高精度，~58M 参数" value="yolo26l.pt" />
                 </template>
                 <template v-else-if="taskType === 'obb'">
-                  <el-option label="Nano  — 最快，~3M 参数（推荐先试）" value="yolo11n-obb.pt" />
-                  <el-option label="Small — 均衡，~10M 参数（推荐）" value="yolo11s-obb.pt" />
-                  <el-option label="Medium — 更精准，~21M 参数" value="yolo11m-obb.pt" />
-                  <el-option label="Large — 高精度，~27M 参数" value="yolo11l-obb.pt" />
-                  <el-option label="XLarge — 最精准，~58M 参数" value="yolo11x-obb.pt" />
+                  <el-option label="yolo11n-obb.pt · Nano — 最快，~3M 参数（推荐先试）" value="yolo11n-obb.pt" />
+                  <el-option label="yolo11s-obb.pt · Small — 均衡，~10M 参数（推荐）" value="yolo11s-obb.pt" />
+                  <el-option label="yolo11m-obb.pt · Medium — 更精准，~21M 参数" value="yolo11m-obb.pt" />
+                  <el-option label="yolo11l-obb.pt · Large — 高精度，~27M 参数" value="yolo11l-obb.pt" />
+                  <el-option label="yolo11x-obb.pt · XLarge — 最精准，~58M 参数" value="yolo11x-obb.pt" />
                 </template>
                 <template v-else>
-                  <el-option label="Nano  — 最快，~3M 参数，适合快速验证" value="yolo26n-seg" />
-                  <el-option label="Small — 均衡，~24M 参数（推荐）" value="yolo26s-seg" />
-                  <el-option label="Medium — 更精准，~40M 参数" value="yolo26m-seg" />
-                  <el-option label="Large — 高精度，~63M 参数" value="yolo26l-seg" />
-                  <el-option label="XLarge — 最精准，~97M 参数" value="yolo26x-seg" />
+                  <el-option label="yolo26n-seg · Nano — 最快，~3M 参数，适合快速验证" value="yolo26n-seg" />
+                  <el-option label="yolo26s-seg · Small — 均衡，~24M 参数（推荐）" value="yolo26s-seg" />
+                  <el-option label="yolo26m-seg · Medium — 更精准，~40M 参数" value="yolo26m-seg" />
+                  <el-option label="yolo26l-seg · Large — 高精度，~63M 参数" value="yolo26l-seg" />
+                  <el-option label="yolo26x-seg · XLarge — 最精准，~97M 参数" value="yolo26x-seg" />
                 </template>
               </el-select>
               <span class="hint">模型越大精度越高，但速度越慢、显存占用越大</span>

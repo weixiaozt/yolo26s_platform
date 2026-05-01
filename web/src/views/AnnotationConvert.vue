@@ -3,7 +3,7 @@
     <div class="page-header">
       <div style="display:flex;align-items:center;gap:12px">
         <h1>标注转换</h1>
-        <el-tag size="small" type="info">seg ⇆ det</el-tag>
+        <el-tag size="small" type="info">seg ⇆ det ⇆ obb</el-tag>
       </div>
       <el-button @click="loadProjects" :loading="loading">
         <el-icon><Refresh /></el-icon> 刷新
@@ -16,8 +16,10 @@
       </template>
       <div style="font-size:13px;line-height:1.7;margin-top:6px">
         平台所有标注统一以多边形（polygon）格式存储。<br>
-        - <b>检测 → 分割</b>：检测的 4 点矩形框对分割训练同样合法（mask 是规整矩形），适合目标本身就是规整形状的场景（如光伏板）<br>
-        - <b>分割 → 检测</b>：分割的多边形会自动转为外接矩形，损失边界信息但能更快训练
+        - <b>分割 → 检测</b>：多边形取外接水平矩形（损失边界信息）<br>
+        - <b>检测 → 分割</b>：4 点矩形对 seg 同样合法（mask 是规整矩形）<br>
+        - <b>分割 → 旋转检测（推荐）</b>：多边形取最小外接<b>旋转</b>矩形（保留角度，对斜目标如太阳能板效果最好）<br>
+        - <b>检测 → 旋转检测</b>：源是水平框，转后所有 OBB 都是 0°，效果等同检测（不推荐）
       </div>
     </el-alert>
 
@@ -30,6 +32,7 @@
             <el-radio-button label="all">全部</el-radio-button>
             <el-radio-button label="seg">仅分割</el-radio-button>
             <el-radio-button label="det">仅检测</el-radio-button>
+            <el-radio-button label="obb">仅旋转</el-radio-button>
           </el-radio-group>
         </div>
       </template>
@@ -54,8 +57,8 @@
         <el-table-column prop="name" label="项目名称" min-width="200" />
         <el-table-column label="类型" width="100">
           <template #default="{row}">
-            <el-tag :type="(row.task_type || 'seg') === 'det' ? 'warning' : 'success'" size="small">
-              {{ (row.task_type || 'seg') === 'det' ? '检测' : '分割' }}
+            <el-tag :type="taskTagType(row.task_type)" size="small">
+              {{ taskTypeLabel(row.task_type) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -88,7 +91,7 @@
           <el-tag size="large">
             #{{ selectedProject.id }} · {{ selectedProject.name }}
             <span style="margin:0 6px">|</span>
-            {{ (selectedProject.task_type || 'seg') === 'det' ? '检测' : '分割' }}
+            {{ taskTypeLabel(selectedProject.task_type) }}
           </el-tag>
         </el-form-item>
 
@@ -100,10 +103,26 @@
             <el-radio-button label="det" :disabled="(selectedProject.task_type || 'seg') === 'det'">
               检测（Det）
             </el-radio-button>
+            <el-radio-button label="obb" :disabled="(selectedProject.task_type || 'seg') === 'obb'">
+              旋转检测（OBB）
+            </el-radio-button>
           </el-radio-group>
           <div class="hint" style="margin-top:6px">
-            源项目类型为 <b>{{ (selectedProject.task_type || 'seg') === 'det' ? '检测' : '分割' }}</b>，
-            可转换为 <b>{{ (selectedProject.task_type || 'seg') === 'det' ? '分割' : '检测' }}</b>
+            <template v-if="(selectedProject.task_type || 'seg') === 'seg' && targetType === 'obb'">
+              ✅ 多边形 → 最小外接旋转矩形（保留角度信息，效果最好）
+            </template>
+            <template v-else-if="(selectedProject.task_type || 'seg') === 'det' && targetType === 'obb'">
+              ⚠ 源是水平矩形，无角度信息；转 OBB 后所有框都是 0°，效果等同 det
+            </template>
+            <template v-else-if="(selectedProject.task_type || 'seg') === 'obb' && targetType === 'seg'">
+              OBB 多边形可直接当作 seg 多边形使用
+            </template>
+            <template v-else-if="(selectedProject.task_type || 'seg') === 'obb' && targetType === 'det'">
+              OBB 取轴对齐外接矩形作 bbox（角度信息丢失）
+            </template>
+            <template v-else>
+              源项目 <b>{{ taskTypeLabel(selectedProject.task_type) }}</b> → <b>{{ taskTypeLabel(targetType) }}</b>
+            </template>
           </div>
         </el-form-item>
 
@@ -158,7 +177,7 @@
       >
         <template #extra v-if="result.success">
           <div style="text-align:left;font-size:13px;color:#606266;margin-bottom:16px">
-            <div>· 任务类型：<b>{{ result.task_type === 'det' ? '检测' : '分割' }}</b></div>
+            <div>· 任务类型：<b>{{ taskTypeLabel(result.task_type) }}</b></div>
             <div>· 图片数量：<b>{{ result.image_count }}</b> 张</div>
             <div>· 标注数量：<b>{{ result.annotation_count }}</b> 个</div>
           </div>
@@ -181,9 +200,16 @@ const router = useRouter()
 
 const projects = ref<Project[]>([])
 const loading = ref(false)
-const filterType = ref<'all' | 'seg' | 'det'>('all')
+const filterType = ref<'all' | 'seg' | 'det' | 'obb'>('all')
 const selectedId = ref<number | null>(null)
-const targetType = ref<'seg' | 'det'>('seg')
+const targetType = ref<'seg' | 'det' | 'obb'>('seg')
+
+function taskTypeLabel(t: string | undefined): string {
+  return ({ seg: '分割', det: '检测', obb: '旋转检测', cls: '分类' } as any)[t || 'seg'] || '分割'
+}
+function taskTagType(t: string | undefined): string {
+  return ({ seg: 'success', det: 'warning', obb: 'danger', cls: 'primary' } as any)[t || 'seg'] || 'success'
+}
 const mode = ref<'copy' | 'inplace'>('copy')
 const newName = ref('')
 const converting = ref(false)
@@ -195,8 +221,10 @@ const selectedProject = computed<Project | undefined>(() =>
 )
 
 const filteredProjects = computed(() => {
-  if (filterType.value === 'all') return projects.value
-  return projects.value.filter(p => (p.task_type || 'seg') === filterType.value)
+  // cls 项目是图级标签，不参与多边形转换
+  const base = projects.value.filter(p => (p.task_type || 'seg') !== 'cls')
+  if (filterType.value === 'all') return base
+  return base.filter(p => (p.task_type || 'seg') === filterType.value)
 })
 
 const canConvert = computed(() => {
@@ -211,9 +239,15 @@ function rowClassName({ row }: any) {
 
 function selectProject(row: Project) {
   selectedId.value = row.id
-  // 自动设置目标类型为相反类型
-  const srcType = row.task_type || 'seg'
-  targetType.value = srcType === 'det' ? 'seg' : 'det'
+  // 智能默认目标类型：seg → obb（最有价值的转换）；det/obb → seg
+  const srcType = (row.task_type || 'seg') as 'seg' | 'det' | 'obb' | 'cls'
+  const defaults: Record<string, 'seg' | 'det' | 'obb'> = {
+    seg: 'obb',
+    det: 'seg',
+    obb: 'seg',
+    cls: 'seg',  // cls 不会出现在转换列表里，兜底
+  }
+  targetType.value = defaults[srcType] || 'obb'
   newName.value = ''
 }
 
