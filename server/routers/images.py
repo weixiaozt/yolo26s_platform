@@ -125,12 +125,15 @@ def list_images(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=1000),
     status: str = Query(default=None, description="按标注状态过滤"),
+    class_id: int | None = Query(default=None, description="按图像分类 id 过滤（cls 项目专用）"),
     db: Session = Depends(get_db),
 ):
     """获取图像列表（分页）"""
     query = db.query(Image).filter(Image.project_id == project_id)
     if status:
         query = query.filter(Image.status == status)
+    if class_id is not None:
+        query = query.filter(Image.class_id == class_id)
 
     total = query.count()
     images = (

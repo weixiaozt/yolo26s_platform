@@ -13,6 +13,17 @@
           <el-radio-button label="unlabeled">未标注 ({{ stats.unlabeled }})</el-radio-button>
           <el-radio-button label="labeled">已标注 ({{ stats.labeled }})</el-radio-button>
         </el-radio-group>
+        <el-tag
+          v-if="classFilter !== null"
+          closable
+          type="warning"
+          effect="dark"
+          size="default"
+          @close="clearClassFilter"
+          style="margin-left:8px"
+        >
+          仅看 {{ classFilterName }} ({{ totalItems }})
+        </el-tag>
         <el-divider direction="vertical" />
         <span class="hint">
           点击选中（{{ selected.size }} / {{ items.length }}）·
@@ -74,14 +85,20 @@
           <div
             v-for="(dc, idx) in defectClasses"
             :key="dc.id"
-            :class="['class-row', { active: hoveredClass === dc.id }]"
+            :class="['class-row', { active: hoveredClass === dc.id, filtering: classFilter === dc.id }]"
             @click="applyClass(dc.id!)"
             @mouseenter="hoveredClass = dc.id || null"
           >
             <span class="key-badge">{{ idx + 1 }}</span>
             <span class="cls-dot" :style="{ background: dc.color }"></span>
             <span class="cls-name">{{ dc.name }}</span>
-            <span class="cls-count">{{ classCounts.get(dc.id!) || 0 }}</span>
+            <span
+              :class="['cls-count', { 'cls-count-active': classFilter === dc.id }]"
+              :title="classFilter === dc.id ? '点击取消筛选' : `点击只看 ${dc.name} 的图片（核对错标）`"
+              @click.stop="toggleClassFilter(dc.id!)"
+            >
+              {{ classCounts.get(dc.id!) || 0 }}
+            </span>
           </div>
           <div class="class-row clear-row" @click="applyClass(null)">
             <span class="key-badge">0</span>
@@ -120,11 +137,18 @@ const items = ref<ImageInfo[]>([])
 const selected = ref<Set<number>>(new Set())
 const lastClickedId = ref<number | null>(null)
 const filter = ref<'all' | 'unlabeled' | 'labeled'>('all')
+const classFilter = ref<number | null>(null)   // 按类别 id 筛选；null = 不筛选
 const loading = ref(false)
 const page = ref(1)
 const pageSize = 36   // 6 × 6
 const totalItems = ref(0)
 const hoveredClass = ref<number | null>(null)
+
+const classFilterName = computed(() =>
+  classFilter.value !== null
+    ? (defectClasses.value.find(c => c.id === classFilter.value)?.name || '')
+    : ''
+)
 
 const saveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
 const saveStateText = computed(() => ({ idle: '', saving: '保存中…', saved: '已保存', error: '保存失败' }[saveState.value]))
@@ -179,6 +203,7 @@ async function loadPage() {
   try {
     const params: any = { page: page.value, page_size: pageSize }
     if (filter.value !== 'all') params.status = filter.value
+    if (classFilter.value !== null) params.class_id = classFilter.value
     const { data } = await imageApi.list(parseInt(props.projectId), params)
     items.value = data.items
     totalItems.value = data.total
@@ -187,6 +212,20 @@ async function loadPage() {
   } finally {
     loading.value = false
   }
+}
+
+function toggleClassFilter(cid: number) {
+  // 已经在筛选这个类 → 取消；否则切到这个类
+  classFilter.value = classFilter.value === cid ? null : cid
+  page.value = 1
+  selected.value.clear()
+  loadPage()
+}
+function clearClassFilter() {
+  classFilter.value = null
+  page.value = 1
+  selected.value.clear()
+  loadPage()
 }
 
 async function reload() {
@@ -401,6 +440,7 @@ onBeforeUnmount(() => {})
 }
 .class-row:hover { background: #333; }
 .class-row.active { background: #1a3a5c; }
+.class-row.filtering { background: #4a3819; box-shadow: inset 3px 0 0 #E6A23C; }
 .class-row.clear-row { margin-top: 6px; border-top: 1px dashed #555; padding-top: 12px; color: #888; }
 .key-badge {
   display: inline-flex;
@@ -416,7 +456,17 @@ onBeforeUnmount(() => {})
 }
 .cls-dot { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
 .cls-name { flex: 1; font-size: 13px; }
-.cls-count { font-size: 12px; color: #888; min-width: 24px; text-align: right; }
+.cls-count {
+  font-size: 12px; color: #888; min-width: 32px; text-align: right;
+  padding: 2px 6px; border-radius: 10px;
+  cursor: pointer; transition: all 0.15s;
+}
+.cls-count:hover {
+  background: #409EFF; color: #fff; font-weight: 600;
+}
+.cls-count-active {
+  background: #E6A23C !important; color: #fff !important; font-weight: 700;
+}
 
 .stats { margin-top: 16px; padding-top: 12px; border-top: 1px solid #333; }
 .stat-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; color: #aaa; }

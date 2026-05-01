@@ -23,7 +23,7 @@ export interface ImageListResponse {
 }
 
 export const imageApi = {
-  list: (projectId: number, params?: { page?: number; page_size?: number; status?: string }) =>
+  list: (projectId: number, params?: { page?: number; page_size?: number; status?: string; class_id?: number }) =>
     api.get<ImageListResponse>(`/projects/${projectId}/images`, { params }),
 
   upload: (projectId: number, files: File[], onProgress?: (pct: number) => void) => {
