@@ -77,6 +77,13 @@
                   <el-option label="Medium — 更精准，~38M 参数" value="yolo26m.pt" />
                   <el-option label="Large — 高精度，~58M 参数" value="yolo26l.pt" />
                 </template>
+                <template v-else-if="taskType === 'obb'">
+                  <el-option label="Nano  — 最快，~3M 参数（推荐先试）" value="yolo11n-obb.pt" />
+                  <el-option label="Small — 均衡，~10M 参数（推荐）" value="yolo11s-obb.pt" />
+                  <el-option label="Medium — 更精准，~21M 参数" value="yolo11m-obb.pt" />
+                  <el-option label="Large — 高精度，~27M 参数" value="yolo11l-obb.pt" />
+                  <el-option label="XLarge — 最精准，~58M 参数" value="yolo11x-obb.pt" />
+                </template>
                 <template v-else>
                   <el-option label="Nano  — 最快，~3M 参数，适合快速验证" value="yolo26n-seg" />
                   <el-option label="Small — 均衡，~24M 参数（推荐）" value="yolo26s-seg" />
@@ -283,7 +290,7 @@ const resumeTaskId = ref<number|null>(null)
 const resumeModelType = ref('best')
 const completedTasks = ref<any[]>([])
 const currentClassCount = ref(0)
-const taskType = ref<'seg'|'det'|'cls'>('seg')
+const taskType = ref<'seg'|'det'|'cls'|'obb'>('seg')
 
 const classCountWarning = computed(() => {
   if (trainMode.value !== 'finetune' || !resumeTaskId.value) return ''
@@ -302,7 +309,7 @@ onMounted(async () => {
   try {
     const { data: proj } = await api.get(`/projects/${props.id}`)
     currentClassCount.value = proj.defect_classes?.length || 0
-    taskType.value = (proj.task_type || 'seg') as 'seg' | 'det' | 'cls'
+    taskType.value = (proj.task_type || 'seg') as 'seg' | 'det' | 'cls' | 'obb'
     // 检测项目使用不同的默认模型和参数
     if (taskType.value === 'det') {
       c.value.model_name = 'yolo26n.pt'  // 检测默认 nano
@@ -314,6 +321,15 @@ onMounted(async () => {
       c.value.train_ratio = 0.8
       // 分类不需要的参数置 0/默认
       c.value.mosaic = 0
+      c.value.copy_paste = 0
+      c.value.mixup = 0
+    } else if (taskType.value === 'obb') {
+      c.value.model_name = 'yolo11s-obb.pt'  // OBB 默认 small
+      c.value.use_morphology = false
+      c.value.train_ratio = 0.85
+      // OBB 受益于任意旋转，保留 degrees=180；但 copy_paste/mosaic 改保守值
+      c.value.degrees = 180
+      c.value.mosaic = 0.3
       c.value.copy_paste = 0
       c.value.mixup = 0
     }

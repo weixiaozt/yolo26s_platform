@@ -251,6 +251,7 @@ def run_train(
     # ---- 任务类型自动适配 ----
     is_det = (task_type == "det")
     is_cls = (task_type == "cls")
+    is_obb = (task_type == "obb")
 
     if is_det:
         # 用户传 yolo26s-seg → 自动改 yolo26s.pt（detect）
@@ -269,6 +270,20 @@ def run_train(
             base = model_name.lower().replace("-seg", "").replace(".pt", "")
             model_name = f"{base}-cls.pt"
             print(f"[task_type=cls] 自动切换分类模型: {model_name}")
+    elif is_obb:
+        # OBB 必须用 -obb 后缀模型（Ultralytics 仅 yolov8/yolo11 系列支持）
+        ml = model_name.lower()
+        if "-obb" not in ml:
+            base = ml.replace("-seg", "").replace("-cls", "").replace(".pt", "")
+            # OBB 任务族目前 yolo11 系列最稳定，强制走 yolo11
+            # 提取规模字母 (n/s/m/l/x)
+            size_letter = "s"
+            for ch in ("n", "s", "m", "l", "x"):
+                if base.endswith(ch):
+                    size_letter = ch
+                    break
+            model_name = f"yolo11{size_letter}-obb.pt"
+            print(f"[task_type=obb] 自动切换 OBB 模型: {model_name}")
 
     # ---- 加载预训练模型 ----
     model = YOLO(model_name)

@@ -419,6 +419,205 @@ def prepare_detection_dataset(
     }
 
 
+def build_obb_dataset_from_db(
+    project_id: int,
+    output_dir: str,
+    db: Session,
+    only_reviewed: bool = False,
+) -> dict:
+    """
+    OBB 数据集构建：将 polygon → 最小外接旋转矩形 4 点 → YOLO OBB txt
+        每行: class_id x1 y1 x2 y2 x3 y3 x4 y4   （8 个归一化坐标，顺时针/逆时针均可）
+
+    Args:
+        project_id: 项目ID
+        output_dir: 输出目录（含 images/ 与 labels/）
+        db: SQLAlchemy Session
+        only_reviewed: 仅使用已审核的图像
+    """
+    import numpy as np
+    import cv2
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ValueError(f"项目不存在: {project_id}")
+
+    class_map = {}
+    classes = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
+    for dc in classes:
+        class_map[dc.id] = dc.class_index
+    class_names = [dc.name for dc in sorted(classes, key=lambda x: x.class_index)]
+
+    status_filter = ["labeled", "reviewed"] if not only_reviewed else ["reviewed"]
+    images_q = (
+        db.query(Image)
+        .filter(Image.project_id == project_id, Image.status.in_(status_filter))
+        .all()
+    )
+    if not images_q:
+        raise ValueError("没有可用的已标注图像")
+
+    out_dir = Path(output_dir)
+    img_out = out_dir / "images"
+    lbl_out = out_dir / "labels"
+    img_out.mkdir(parents=True, exist_ok=True)
+    lbl_out.mkdir(parents=True, exist_ok=True)
+
+    stats = {
+        "total_images": len(images_q),
+        "labeled_images": 0,
+        "background_images": 0,
+        "total_annotations": 0,
+        "class_names": class_names,
+        "class_distribution": {},
+    }
+
+    for image in images_q:
+        fp = Path(image.file_path)
+        src_path = fp if (fp.is_absolute() and fp.exists()) else settings.upload_path / image.file_path
+        if not src_path.exists():
+            continue
+
+        stem = f"{image.id:06d}"
+        ext = src_path.suffix.lower()
+        if ext not in {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}:
+            ext = '.png'
+        dst_img = img_out / f"{stem}{ext}"
+        shutil.copy2(str(src_path), str(dst_img))
+
+        annotations = (
+            db.query(Annotation).filter(Annotation.image_id == image.id).all()
+        )
+        img_w = image.width or 1
+        img_h = image.height or 1
+
+        lines = []
+        for ann in annotations:
+            cls_index = class_map.get(ann.class_id)
+            if cls_index is None or not ann.polygon:
+                continue
+            # 收集多边形点（图像坐标 or 归一化都接受）
+            xs, ys = [], []
+            for p in ann.polygon:
+                if isinstance(p, dict):
+                    xs.append(float(p['x']))
+                    ys.append(float(p['y']))
+                else:
+                    xs.append(float(p[0]))
+                    ys.append(float(p[1]))
+            if len(xs) < 3:
+                continue
+            # 归一化坐标转图像坐标（minAreaRect 需要图像坐标）
+            if max(xs + ys) <= 1.0:
+                px = [x * img_w for x in xs]
+                py = [y * img_h for y in ys]
+            else:
+                px = xs
+                py = ys
+
+            pts = np.array(list(zip(px, py)), dtype=np.float32)
+            try:
+                rect = cv2.minAreaRect(pts)              # ((cx,cy),(w,h),angle)
+                box = cv2.boxPoints(rect)                # 4×2 角点（图像坐标）
+            except cv2.error:
+                continue
+
+            # 归一化 + clamp
+            norm = []
+            for (x, y) in box:
+                nx = max(0.0, min(1.0, float(x) / img_w))
+                ny = max(0.0, min(1.0, float(y) / img_h))
+                norm.append((nx, ny))
+
+            # 退化检查（4 点中任意两点重合 → 跳过）
+            if len({(round(n[0], 5), round(n[1], 5)) for n in norm}) < 4:
+                continue
+
+            coords = " ".join(f"{x:.6f} {y:.6f}" for x, y in norm)
+            lines.append(f"{cls_index} {coords}")
+
+            stats["class_distribution"][cls_index] = \
+                stats["class_distribution"].get(cls_index, 0) + 1
+            stats["total_annotations"] += 1
+
+        lbl_path = lbl_out / f"{stem}.txt"
+        lbl_path.write_text("\n".join(lines) + ("\n" if lines else ""))
+
+        if lines:
+            stats["labeled_images"] += 1
+        else:
+            stats["background_images"] += 1
+
+    return stats
+
+
+def prepare_obb_dataset(
+    project_id: int,
+    task_output_dir: str,
+    db: Session,
+    train_ratio: float = 0.85,
+    seed: int = 42,
+    progress_callback=None,
+) -> dict:
+    """
+    OBB 数据集准备（结构与 detection 一致，区别仅在 label 内容）。
+    """
+    import random
+
+    task_dir = Path(task_output_dir)
+
+    if progress_callback:
+        progress_callback(0, 2, "从数据库导出 OBB 标注数据...")
+
+    raw_dir = str(task_dir / "raw")
+    export_stats = build_obb_dataset_from_db(project_id, raw_dir, db)
+    class_names = export_stats["class_names"]
+
+    raw_path = Path(raw_dir)
+    img_files = sorted((raw_path / "images").iterdir())
+    if not img_files:
+        raise ValueError("数据集为空")
+    valid = [f for f in img_files if f.is_file()]
+
+    if progress_callback:
+        progress_callback(1, 2, "划分训练集 / 验证集...")
+
+    random.seed(seed)
+    indices = list(range(len(valid)))
+    random.shuffle(indices)
+    split_idx = max(1, int(len(indices) * train_ratio))
+    train_set = set(indices[:split_idx])
+
+    dataset_dir = task_dir / "dataset"
+    for split in ("train", "val"):
+        (dataset_dir / "images" / split).mkdir(parents=True, exist_ok=True)
+        (dataset_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
+
+    train_count = val_count = 0
+    for i, img_path in enumerate(valid):
+        split = "train" if i in train_set else "val"
+        if split == "train":
+            train_count += 1
+        else:
+            val_count += 1
+        shutil.copy2(str(img_path), str(dataset_dir / "images" / split / img_path.name))
+        lbl_src = raw_path / "labels" / f"{img_path.stem}.txt"
+        if lbl_src.exists():
+            shutil.copy2(str(lbl_src), str(dataset_dir / "labels" / split / f"{img_path.stem}.txt"))
+        else:
+            (dataset_dir / "labels" / split / f"{img_path.stem}.txt").touch()
+
+    if progress_callback:
+        progress_callback(2, 2, "OBB 数据集准备完成")
+
+    return {
+        "dataset_dir": str(dataset_dir),
+        "class_names": class_names,
+        "export_stats": export_stats,
+        "split_stats": {"train": train_count, "val": val_count, "total": len(valid)},
+    }
+
+
 def prepare_classification_dataset(
     project_id: int,
     task_output_dir: str,

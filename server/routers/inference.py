@@ -98,6 +98,128 @@ def list_devices():
     return devices
 
 
+def _resolve_class_names(model, project_id: int, db) -> dict:
+    """
+    类别名映射 (class_index → name)。
+    优先从项目 DefectClass 表读，查不到时回退到模型训练时存入的 model.names。
+    （之前推断界面显示 "C0" 就是数据库查询为空 + 没有兜底导致的。）
+    """
+    cn = {}
+    if project_id and project_id > 0:
+        try:
+            dcs = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
+            cn = {int(dc.class_index): dc.name for dc in dcs}
+        except Exception:
+            pass
+    if not cn:
+        mn = getattr(model, "names", None) or {}
+        try:
+            cn = {int(k): str(v) for k, v in (mn.items() if isinstance(mn, dict) else enumerate(mn))}
+        except Exception:
+            pass
+    return cn
+
+
+def _run_obb_inference(model, img_array, file, project_id, task_id, conf, iou, device, db):
+    """
+    OBB 推断：返回每个目标的 4 角点 polygon（图像像素坐标）+ 类别 + 置信度。
+    在原图上画旋转四边形作为 overlay。
+    """
+    import time
+    t0 = time.time()
+    pred = model.predict(
+        img_array, verbose=False,
+        conf=conf or 0.25, iou=iou or 0.5,
+        device=device if device != "cpu" else "cpu",
+    )
+    elapsed = time.time() - t0
+
+    r0 = pred[0] if pred else None
+    obb = getattr(r0, "obb", None) if r0 is not None else None
+
+    detections = []
+    if obb is not None and obb.xyxyxyxy is not None and len(obb) > 0:
+        # xyxyxyxy: (N, 4, 2) 图像像素坐标
+        polys = obb.xyxyxyxy.cpu().numpy() if hasattr(obb.xyxyxyxy, "cpu") else obb.xyxyxyxy
+        cls_ids = obb.cls.cpu().numpy().astype(int) if hasattr(obb.cls, "cpu") else obb.cls
+        confs = obb.conf.cpu().numpy() if hasattr(obb.conf, "cpu") else obb.conf
+
+        cn = _resolve_class_names(model, project_id, db)
+        for poly, cid, cf in zip(polys, cls_ids, confs):
+            cid = int(cid)
+            pts = [{"x": float(p[0]), "y": float(p[1])} for p in poly]
+            xs = [p["x"] for p in pts]
+            ys = [p["y"] for p in pts]
+            detections.append({
+                "class_id": cid,
+                "class_name": cn.get(cid, f"C{cid}"),
+                "confidence": round(float(cf), 4),
+                # 4 点旋转矩形（前端连线即可）
+                "polygon": pts,
+                # 同时给一个轴对齐外接矩形做兼容（不影响 OBB 显示）
+                "bbox": {"x1": int(min(xs)), "y1": int(min(ys)),
+                         "x2": int(max(xs)), "y2": int(max(ys))},
+            })
+
+    # ---- 在原图上画旋转四边形作为 overlay ----
+    overlay = img_array.copy()
+    if overlay.ndim == 2:
+        overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+    elif overlay.shape[2] == 4:
+        overlay = cv2.cvtColor(overlay, cv2.COLOR_BGRA2BGR)
+
+    # 用类别 id 决定颜色（BGR）
+    palette = [(76,76,255),(76,255,103),(45,165,230),(255,144,76),(204,128,189),
+               (193,166,12),(193,89,89),(0,128,255),(128,255,128)]
+
+    for det in detections:
+        color = palette[det["class_id"] % len(palette)]
+        pts = np.array([[p["x"], p["y"]] for p in det["polygon"]], dtype=np.int32)
+        cv2.polylines(overlay, [pts], isClosed=True, color=color, thickness=2)
+        # 标签框（用第一个点上方）
+        label = f"{det['class_name']} {det['confidence']:.2f}"
+        x0, y0 = int(pts[0][0]), int(pts[0][1])
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        cv2.rectangle(overlay, (x0, max(0, y0 - th - 4)), (x0 + tw + 4, y0), color, -1)
+        cv2.putText(overlay, label, (x0 + 2, max(th, y0 - 2)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # ---- 保存图片（original + overlay） ----
+    infer_dir = settings.runs_path / "inference"
+    infer_dir.mkdir(parents=True, exist_ok=True)
+    rid = uuid.uuid4().hex[:12]
+    cv2.imwrite(str(infer_dir / f"{rid}_original.png"), img_array)
+    cv2.imwrite(str(infer_dir / f"{rid}_overlay.png"), overlay)
+    url_pfx = "/static/storage/runs/inference"
+
+    record = InferenceResult(
+        project_id=project_id, task_id=task_id,
+        filename=file.filename or "unknown", device=device,
+        conf_thresh=conf, iou_thresh=iou, resize_size=0,
+        num_detections=len(detections),
+        inference_time=round(elapsed, 3),
+        detections=detections,
+        original_path=f"{url_pfx}/{rid}_original.png",
+        overlay_path=f"{url_pfx}/{rid}_overlay.png",
+    )
+    db.add(record); db.commit(); db.refresh(record)
+
+    return {
+        "id": record.id,
+        "task_type": "obb",
+        "filename": record.filename,
+        "device": record.device,
+        "num_detections": record.num_detections,
+        "inference_time": record.inference_time,
+        "detections": detections,
+        "original_url": record.original_path,
+        "overlay_url": record.overlay_path,
+        "overlay_morph_url": None,
+        "mask_url": "",
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+
 def _run_cls_inference(model, img_array, content, file, project_id, task_id, device, db):
     """分类推断：返回 top-1 类别 + top-5 概率"""
     import time
@@ -122,11 +244,8 @@ def _run_cls_inference(model, img_array, content, file, project_id, task_id, dev
             for cid, conf in zip(ids, confs):
                 top5.append({"class_id": int(cid), "confidence": round(float(conf), 4)})
 
-    # 类别名映射
-    class_names = {}
-    if project_id > 0:
-        dcs = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
-        class_names = {dc.class_index: dc.name for dc in dcs}
+    # 类别名映射（DB 找不到时用 model.names 兜底）
+    class_names = _resolve_class_names(model, project_id, db)
     for d in top5:
         d["class_name"] = class_names.get(d["class_id"], f"C{d['class_id']}")
     top1_name = class_names.get(top1_id, f"C{top1_id}")
@@ -225,6 +344,13 @@ async def run_inference(
             file=file, project_id=project_id, task_id=task_id,
             device=device, db=db,
         )
+    # OBB 推断也是整图（不滑窗），输出旋转矩形 4 角点
+    if task_type == "obb":
+        return _run_obb_inference(
+            model=model, img_array=img_array, file=file,
+            project_id=project_id, task_id=task_id,
+            conf=conf, iou=iou, device=device, db=db,
+        )
 
     from core.inference import infer_single_image
     result = infer_single_image(
@@ -249,11 +375,8 @@ async def run_inference(
         cv2.imwrite(str(infer_dir / f"{rid}_{name}.png"), img)
     url_pfx = "/static/storage/runs/inference"
 
-    # 加载类别名称映射
-    class_names = {}
-    if project_id > 0:
-        dcs = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
-        class_names = {dc.class_index: dc.name for dc in dcs}
+    # 加载类别名称映射（DB 找不到时用 model.names 兜底）
+    class_names = _resolve_class_names(model, project_id, db)
 
     # 检测列表
     detections = []
@@ -318,7 +441,7 @@ def list_history(project_id: int = Query(default=0), page: int = Query(default=1
         if not dets: return []
         names = get_class_names(pid) if pid else {}
         for d in dets:
-            if "class_name" not in d:
+            if "class_name" not in d or not d.get("class_name"):
                 cid = d.get("class_id", 0)
                 d["class_name"] = names.get(cid, f"C{cid}")
         return dets
@@ -337,13 +460,17 @@ def list_history(project_id: int = Query(default=0), page: int = Query(default=1
         return tt
 
     def infer_task_type(r) -> str:
-        """优先从 TrainTask.config 取；取不到时根据 detections 是否含 bbox 兜底判断"""
+        """优先从 TrainTask.config 取；取不到时根据 detections 字段兜底判断"""
         tt = get_task_type(r.task_id) if r.task_id else None
         if tt:
             return tt
         dets = r.detections or []
-        if dets and "bbox" not in dets[0]:
-            return "cls"
+        if dets:
+            d0 = dets[0]
+            if "polygon" in d0 and isinstance(d0.get("polygon"), list) and len(d0.get("polygon")) == 4:
+                return "obb"
+            if "bbox" not in d0:
+                return "cls"
         return "seg"
 
     return {"total": total, "page": page, "page_size": page_size, "items": [

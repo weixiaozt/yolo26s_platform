@@ -57,13 +57,13 @@
       <!-- 中间：大图查看器 -->
       <div class="viewer">
         <template v-if="current">
-          <!-- 视图切换（cls 不需要） -->
+          <!-- 视图切换（cls 不需要；obb 没有 mask） -->
           <div class="view-bar">
             <el-radio-group v-if="!isCls" v-model="viewMode" size="small">
               <el-radio-button label="overlay">检测结果</el-radio-button>
               <el-radio-button label="original">原图</el-radio-button>
-              <el-radio-button label="mask">Mask</el-radio-button>
-              <el-radio-button label="compare">同时显示</el-radio-button>
+              <el-radio-button v-if="!isObb" label="mask">Mask</el-radio-button>
+              <el-radio-button v-if="!isObb" label="compare">同时显示</el-radio-button>
             </el-radio-group>
             <el-switch
               v-if="!isCls && current.overlay_morph_url"
@@ -106,13 +106,32 @@
           </div>
 
           <!-- 检测详情（seg / det） -->
-          <div v-if="!isCls && current.detections.length>0" class="detail-bar">
+          <div v-if="!isCls && !isObb && current.detections.length>0" class="detail-bar">
             <el-table :data="current.detections" stripe size="small" max-height="160" style="width:100%">
               <el-table-column type="index" label="#" width="45" />
               <el-table-column label="类别" width="90"><template #default="{row}"><el-tag size="small">{{ row.class_name || ('C' + row.class_id) }}</el-tag></template></el-table-column>
               <el-table-column label="置信度" width="80"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(1)}}%</b></template></el-table-column>
               <el-table-column label="位置"><template #default="{row}"><span v-if="row.bbox">({{row.bbox.x1}},{{row.bbox.y1}})→({{row.bbox.x2}},{{row.bbox.y2}})</span><span v-else>—</span></template></el-table-column>
               <el-table-column label="尺寸" width="90"><template #default="{row}"><span v-if="row.bbox">{{row.bbox.x2-row.bbox.x1}}×{{row.bbox.y2-row.bbox.y1}}</span><span v-else>—</span></template></el-table-column>
+            </el-table>
+          </div>
+
+          <!-- 旋转目标检测 OBB -->
+          <div v-else-if="isObb && current.detections.length>0" class="detail-bar">
+            <el-table :data="current.detections" stripe size="small" max-height="200" style="width:100%">
+              <el-table-column type="index" label="#" width="45" />
+              <el-table-column label="类别" width="100"><template #default="{row}"><el-tag size="small">{{ row.class_name || ('C' + row.class_id) }}</el-tag></template></el-table-column>
+              <el-table-column label="置信度" width="80"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(1)}}%</b></template></el-table-column>
+              <el-table-column label="中心" width="120"><template #default="{row}">{{ obbCenter(row) }}</template></el-table-column>
+              <el-table-column label="尺寸" width="100"><template #default="{row}">{{ obbSize(row) }}</template></el-table-column>
+              <el-table-column label="角度" width="80"><template #default="{row}">{{ obbAngle(row) }}°</template></el-table-column>
+              <el-table-column label="4 角点">
+                <template #default="{row}">
+                  <span v-if="row.polygon" style="font-size:11px;color:#909399">
+                    {{ row.polygon.map((p:any)=>`(${Math.round(p.x)},${Math.round(p.y)})`).join(' → ') }}
+                  </span>
+                </template>
+              </el-table-column>
             </el-table>
           </div>
 
@@ -166,7 +185,11 @@ const router = useRouter()
 // URLs already include /api prefix
 
 interface ModelInfo { task_id:number; model_format:string; label:string; model_path:string }
-interface Det { class_id:number; class_name?:string; confidence:number; bbox?:{x1:number;y1:number;x2:number;y2:number} }
+interface Det {
+  class_id:number; class_name?:string; confidence:number;
+  bbox?:{x1:number;y1:number;x2:number;y2:number};
+  polygon?:Array<{x:number;y:number}>
+}
 interface Rec { id:number; filename:string; num_detections:number; inference_time:number; detections:Det[]; original_url:string; overlay_url:string; overlay_morph_url?:string|null; mask_url:string; device:string; created_at:string|null; task_type?:string }
 
 interface DeviceInfo { id:string; name:string; available:boolean }
@@ -193,8 +216,46 @@ const isCls = computed(() => {
   if (!r) return false
   if (r.task_type === 'cls') return true
   const dets = r.detections || []
-  return dets.length > 0 && !dets[0].bbox
+  // cls 既没有 bbox 也没有 polygon
+  return dets.length > 0 && !dets[0].bbox && !dets[0].polygon
 })
+
+// 是否旋转目标检测（OBB）
+const isObb = computed(() => {
+  const r = current.value
+  if (!r) return false
+  if (r.task_type === 'obb') return true
+  const dets = r.detections || []
+  return dets.length > 0 && Array.isArray(dets[0].polygon) && dets[0].polygon!.length === 4
+})
+
+// ---- OBB 工具函数（基于 4 点 polygon） ----
+function obbCenter(row: Det): string {
+  const p = row.polygon
+  if (!p || p.length < 4) return '-'
+  const cx = (p[0].x + p[1].x + p[2].x + p[3].x) / 4
+  const cy = (p[0].y + p[1].y + p[2].y + p[3].y) / 4
+  return `(${Math.round(cx)}, ${Math.round(cy)})`
+}
+function obbSize(row: Det): string {
+  const p = row.polygon
+  if (!p || p.length < 4) return '-'
+  const e1 = Math.hypot(p[1].x - p[0].x, p[1].y - p[0].y)
+  const e2 = Math.hypot(p[2].x - p[1].x, p[2].y - p[1].y)
+  return `${Math.round(Math.max(e1, e2))}×${Math.round(Math.min(e1, e2))}`
+}
+function obbAngle(row: Det): string {
+  const p = row.polygon
+  if (!p || p.length < 4) return '0'
+  // 取长边方向作为角度（0~180°）
+  const e1 = Math.hypot(p[1].x - p[0].x, p[1].y - p[0].y)
+  const e2 = Math.hypot(p[2].x - p[1].x, p[2].y - p[1].y)
+  const longEdge = e1 >= e2 ? [p[0], p[1]] : [p[1], p[2]]
+  let deg = Math.atan2(longEdge[1].y - longEdge[0].y, longEdge[1].x - longEdge[0].x) * 180 / Math.PI
+  if (deg < 0) deg += 180
+  if (deg >= 180) deg -= 180
+  return deg.toFixed(1)
+}
 
 const currentSrc = computed(() => {
   if (!current.value) return ''

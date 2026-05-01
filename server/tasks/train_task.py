@@ -22,6 +22,7 @@ from ..models.train_task import TrainTask, TrainEpochLog
 from ..models.project import Project
 from ..services.dataset_service import (
     prepare_full_dataset, prepare_detection_dataset, prepare_classification_dataset,
+    prepare_obb_dataset,
 )
 from ..config import settings
 
@@ -73,6 +74,13 @@ def run_training_pipeline(self, task_id: int):
             )
         elif task_type == "det":
             dataset_result = prepare_detection_dataset(
+                project_id=project_id,
+                task_output_dir=str(task_dir),
+                db=db,
+                train_ratio=config.get("train_ratio", 0.85),
+            )
+        elif task_type == "obb":
+            dataset_result = prepare_obb_dataset(
                 project_id=project_id,
                 task_output_dir=str(task_dir),
                 db=db,

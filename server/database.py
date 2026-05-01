@@ -79,6 +79,12 @@ def init_db():
             "ALTER TABLE train_epoch_logs ADD COLUMN top5_acc FLOAT NULL COMMENT 'cls top5'",
             "train_epoch_logs.top5_acc",
         ),
+        # 扩展 task_type ENUM 加 obb（旋转目标检测）
+        (
+            "ALTER TABLE projects MODIFY COLUMN task_type ENUM('seg','det','cls','obb') "
+            "NOT NULL DEFAULT 'seg' COMMENT '任务类型: seg=分割, det=目标检测, cls=图像分类, obb=旋转目标检测'",
+            "projects.task_type 扩展 obb",
+        ),
     ]
     for sql, label in migrations:
         with engine.connect() as conn:
