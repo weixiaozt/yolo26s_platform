@@ -21,68 +21,76 @@
       </div>
     </div>
 
-    <!-- 项目卡片列表 -->
-    <div v-if="projects.length > 0" class="project-grid">
-      <el-card
-        v-for="p in projects"
-        :key="p.id"
-        class="project-card"
-        shadow="hover"
-        @click="router.push(`/project/${p.id}`)"
-      >
-        <template #header>
-          <div class="card-header">
-            <span class="project-name">{{ p.name }}</span>
-            <el-tag :type="p.status === 'active' ? 'success' : 'info'" size="small">
-              {{ p.status === 'active' ? '活跃' : '归档' }}
-            </el-tag>
-          </div>
-        </template>
-        <p class="project-desc">{{ p.description || '暂无描述' }}</p>
-        <div class="project-meta">
-          <el-tag :type="taskTypeTag(p.task_type)" size="small" effect="plain">
-            {{ taskTypeLabel(p.task_type) }}
-          </el-tag>
-          <span>
-            <el-icon><Picture /></el-icon>
-            {{ p.resize_h }}×{{ p.resize_w }} → {{ p.crop_size }}
-          </span>
-          <span>
-            <el-icon><Collection /></el-icon>
-            {{ p.defect_classes.length }} 个类别
-          </span>
+    <!-- 项目卡片列表（按任务类型分组：seg → cls → obb → det，组内按创建时间倒序）-->
+    <div v-if="projects.length > 0">
+      <template v-for="g in groupedProjects" :key="g.type">
+        <div class="group-header">
+          <span class="group-title">{{ g.label }}</span>
+          <span class="group-count">{{ g.items.length }} 个</span>
         </div>
-        <div class="project-classes">
-          <el-tag
-            v-for="dc in p.defect_classes"
-            :key="dc.class_index"
-            :color="dc.color"
-            effect="dark"
-            size="small"
-            style="margin-right: 4px; margin-bottom: 4px; border: none;"
+        <div class="project-grid">
+          <el-card
+            v-for="p in g.items"
+            :key="p.id"
+            class="project-card"
+            shadow="hover"
+            @click="router.push(`/project/${p.id}`)"
           >
-            {{ dc.name }}
-          </el-tag>
+            <template #header>
+              <div class="card-header">
+                <span class="project-name">{{ p.name }}</span>
+                <el-tag :type="p.status === 'active' ? 'success' : 'info'" size="small">
+                  {{ p.status === 'active' ? '活跃' : '归档' }}
+                </el-tag>
+              </div>
+            </template>
+            <p class="project-desc">{{ p.description || '暂无描述' }}</p>
+            <div class="project-meta">
+              <el-tag :type="taskTypeTag(p.task_type)" size="small" effect="plain">
+                {{ taskTypeLabel(p.task_type) }}
+              </el-tag>
+              <span>
+                <el-icon><Picture /></el-icon>
+                {{ p.resize_h }}×{{ p.resize_w }} → {{ p.crop_size }}
+              </span>
+              <span>
+                <el-icon><Collection /></el-icon>
+                {{ p.defect_classes.length }} 个类别
+              </span>
+            </div>
+            <div class="project-classes">
+              <el-tag
+                v-for="dc in p.defect_classes"
+                :key="dc.class_index"
+                :color="dc.color"
+                effect="dark"
+                size="small"
+                style="margin-right: 4px; margin-bottom: 4px; border: none;"
+              >
+                {{ dc.name }}
+              </el-tag>
+            </div>
+            <div class="project-time">
+              创建于 {{ formatDate(p.created_at) }}
+              <el-button
+                type="danger" text size="small"
+                style="float: right"
+                @click.stop="handleDeleteProject(p.id, p.name)"
+              >
+                删除项目
+              </el-button>
+              <el-button
+                type="primary" text size="small"
+                style="float: right; margin-right: 8px"
+                :loading="exportingId === p.id"
+                @click.stop="handleExport(p)"
+              >
+                导出
+              </el-button>
+            </div>
+          </el-card>
         </div>
-        <div class="project-time">
-          创建于 {{ formatDate(p.created_at) }}
-          <el-button
-            type="danger" text size="small"
-            style="float: right"
-            @click.stop="handleDeleteProject(p.id, p.name)"
-          >
-            删除项目
-          </el-button>
-          <el-button
-            type="primary" text size="small"
-            style="float: right; margin-right: 8px"
-            :loading="exportingId === p.id"
-            @click.stop="handleExport(p)"
-          >
-            导出
-          </el-button>
-        </div>
-      </el-card>
+      </template>
     </div>
 
     <!-- 空状态 -->
@@ -184,12 +192,31 @@ function taskTypeTag(t: string | undefined) {
   return ({ seg: 'success', det: 'warning', cls: 'primary', obb: 'danger' } as any)[t || 'seg'] || 'success'
 }
 
+// 项目分组顺序：seg → cls → obb → det，组内按 created_at 倒序
+const GROUP_ORDER: Array<{ type: string; label: string }> = [
+  { type: 'seg', label: '实例分割' },
+  { type: 'cls', label: '图像分类' },
+  { type: 'obb', label: '旋转检测' },
+  { type: 'det', label: '目标检测' },
+]
+
 const router = useRouter()
 const projects = ref<Project[]>([])
 const showCreateDialog = ref(false)
 const creating = ref(false)
 const exportingId = ref<number | null>(null)
 const importing = ref(false)
+
+const groupedProjects = computed(() => {
+  return GROUP_ORDER
+    .map(g => ({
+      ...g,
+      items: projects.value
+        .filter(p => (p.task_type || 'seg') === g.type)
+        .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')),
+    }))
+    .filter(g => g.items.length > 0)
+})
 
 const defaultColors = ['#FF4444', '#44BB44', '#4488FF', '#FFAA00', '#FF44FF', '#44FFFF']
 
@@ -350,10 +377,24 @@ onMounted(loadProjects)
 </script>
 
 <style scoped>
+.group-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 18px 0 10px;
+  padding-left: 4px;
+  border-left: 4px solid #409EFF;
+  padding-left: 12px;
+}
+.group-header:first-child { margin-top: 0; }
+.group-title { font-size: 16px; font-weight: 600; color: #303133; }
+.group-count { font-size: 12px; color: #909399; }
+
 .project-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 20px;
+  margin-bottom: 24px;
 }
 .project-card {
   cursor: pointer;
