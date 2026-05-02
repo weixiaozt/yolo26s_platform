@@ -270,6 +270,20 @@ def run_train(
             base = model_name.lower().replace("-seg", "").replace(".pt", "")
             model_name = f"{base}-cls.pt"
             print(f"[task_type=cls] 自动切换分类模型: {model_name}")
+        # cls 防呆：项目级 crop_size 对 cls 无意义；YOLO11-cls.pt 是 ImageNet 224 预训练的，
+        # 工业小图放大到 640 会引入插值伪影 → 学不到纹理，模型塌缩到多数类。
+        if imgsz != 224:
+            print(f"[task_type=cls] imgsz {imgsz} → 224（YOLO11-cls 标准）")
+            imgsz = 224
+        # 工业 cls 常依赖纹理方向，关掉旋转/上下翻转；mosaic/mixup/copy_paste cls 不读但显式置 0 防误用
+        augment_degrees = 0.0
+        augment_flipud = 0.0
+        augment_translate = min(augment_translate, 0.1)
+        augment_scale = min(augment_scale, 0.2)
+        augment_shear = 0.0
+        augment_mosaic = 0.0
+        augment_copy_paste = 0.0
+        augment_mixup = 0.0
     elif is_obb:
         # OBB 必须用 -obb 后缀模型（Ultralytics 仅 yolov8/yolo11 系列支持）
         ml = model_name.lower()

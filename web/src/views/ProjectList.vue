@@ -125,12 +125,12 @@
             </el-form-item>
           </el-col>
         </el-row>
-        <el-row :gutter="16">
+        <el-row :gutter="16" v-if="form.task_type !== 'cls'">
           <el-col :span="12">
             <el-form-item :label="cropSizeLabel">
               <el-input-number
                 v-model="form.crop_size"
-                :min="form.task_type === 'cls' ? 32 : 320"
+                :min="320"
                 :max="8192" :step="32" style="width:100%"
               />
             </el-form-item>
@@ -141,6 +141,10 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <el-alert v-else type="info" :closable="false" show-icon
+          title="分类项目无需 Resize/切割尺寸"
+          description="分类训练统一使用 ImageNet 标准 imgsz=224，原图直接 letterbox 到 224×224，不切大图。"
+          style="margin-bottom:18px" />
 
         <el-divider content-position="left">缺陷类别</el-divider>
         <div v-for="(cls, idx) in form.class_names" :key="idx" class="class-row">

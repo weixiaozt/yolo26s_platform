@@ -328,10 +328,22 @@ onMounted(async () => {
       c.value.model_name = 'yolo11s-cls.pt'  // 分类默认 small
       c.value.use_morphology = false
       c.value.train_ratio = 0.8
+      // 分类专属：imgsz=224（YOLO11-cls 在 ImageNet 上的标准尺寸）
+      // 工业小图放大到 640 会引入大量插值伪影 → 模型学不到真实纹理
+      c.value.crop_size = 224
       // 分类不需要的参数置 0/默认
+      c.value.degrees = 0       // 工业 cls 常依赖纹理方向，关掉旋转
+      c.value.flipud = 0        // 关掉上下翻转
+      c.value.fliplr = 0.5      // 仅保留水平翻转
+      c.value.translate = 0.05  // 平移幅度调小
+      c.value.scale = 0.2       // 缩放幅度调小
+      c.value.shear = 0
       c.value.mosaic = 0
       c.value.copy_paste = 0
       c.value.mixup = 0
+      c.value.erasing = 0
+      c.value.epochs = 100      // cls 收敛快
+      c.value.patience = 30
     } else if (taskType.value === 'obb') {
       c.value.model_name = 'yolo11s-obb.pt'  // OBB 默认 small
       c.value.use_morphology = false

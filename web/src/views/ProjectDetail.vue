@@ -186,30 +186,38 @@
         <el-form-item label="描述">
           <el-input v-model="editForm.description" type="textarea" :rows="2" />
         </el-form-item>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="Resize 高">
-              <el-input-number v-model="editForm.resize_h" :min="640" :step="256" style="width:100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="Resize 宽">
-              <el-input-number v-model="editForm.resize_w" :min="640" :step="256" style="width:100%" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="切割尺寸">
-              <el-input-number v-model="editForm.crop_size" :min="320" :max="1280" :step="32" style="width:100%" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="重叠率">
-              <el-input-number v-model="editForm.overlap" :min="0" :max="0.5" :step="0.05" :precision="2" style="width:100%" />
-            </el-form-item>
-          </el-col>
-        </el-row>
+        <!-- cls 项目隐藏 Resize/切割尺寸/重叠率（cls 训练统一走 imgsz=224，不切大图） -->
+        <template v-if="project?.task_type !== 'cls'">
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="Resize 高">
+                <el-input-number v-model="editForm.resize_h" :min="640" :step="256" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Resize 宽">
+                <el-input-number v-model="editForm.resize_w" :min="640" :step="256" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="切割尺寸">
+                <el-input-number v-model="editForm.crop_size" :min="320" :max="1280" :step="32" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="重叠率">
+                <el-input-number v-model="editForm.overlap" :min="0" :max="0.5" :step="0.05" :precision="2" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </template>
+        <el-form-item v-else>
+          <el-alert type="info" :closable="false" show-icon
+            title="分类项目无需 Resize/切割尺寸"
+            description="分类训练统一使用 ImageNet 标准 imgsz=224，原图直接 letterbox 到 224×224。这些字段对分类无效。" />
+        </el-form-item>
       </el-form>
 
       <!-- 类别管理 -->

@@ -55,6 +55,7 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
     project_data = {
         "name": project.name,
         "description": project.description,
+        "task_type": project.task_type,
         "resize_h": project.resize_h,
         "resize_w": project.resize_w,
         "crop_size": project.crop_size,
@@ -66,7 +67,6 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
         "exported_at": datetime.now().isoformat(),
         "source_project_id": project_id,
     }
-
     images_data = []
     annotations_data = []
     upload_root = settings.upload_path
@@ -82,6 +82,7 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
             # ZIP 内文件名使用 file_path 的 basename（已含 uuid 前缀，保证唯一）
             zip_img_name = Path(img.file_path).name
 
+            # cls 图级标签：用 class_index（跨项目可移植）；非 cls 留空
             images_data.append({
                 "zip_filename": zip_img_name,
                 "original_filename": img.filename,
@@ -90,6 +91,7 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
                 "status": img.status,
                 "annotator": img.annotator,
                 "reviewer": img.reviewer,
+                "class_index": class_id_to_index.get(img.class_id) if img.class_id else None,
             })
 
             zf.write(str(src_path), f"images/{zip_img_name}")
@@ -153,6 +155,7 @@ def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
         project = Project(
             name=final_name,
             description=project_data.get("description"),
+            task_type=project_data.get("task_type", "seg"),
             resize_h=project_data.get("resize_h", 2048),
             resize_w=project_data.get("resize_w", 2048),
             crop_size=project_data.get("crop_size", 640),
@@ -193,6 +196,8 @@ def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
                 shutil.copyfileobj(src, dst)
 
             rel_path = f"{project.id}/{new_name}"
+            cls_idx = img_info.get("class_index")
+            cls_id = class_index_to_id.get(cls_idx) if cls_idx is not None else None
             image = Image(
                 project_id=project.id,
                 filename=img_info.get("original_filename", zip_name),
@@ -203,6 +208,7 @@ def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
                 status=img_info.get("status", "labeled"),
                 annotator=img_info.get("annotator"),
                 reviewer=img_info.get("reviewer"),
+                class_id=cls_id,
             )
             db.add(image)
             db.flush()
