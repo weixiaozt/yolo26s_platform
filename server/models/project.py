@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
 
-from sqlalchemy import String, Text, Integer, Float, Enum, DateTime
+from sqlalchemy import String, Text, Integer, Float, Enum, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
@@ -32,6 +32,10 @@ class Project(Base):
         Enum("active", "archived", name="project_status"),
         default="active"
     )
+
+    # 训练参数缓存：用户上次在 TrainConfig 页面"保存为默认"的参数 JSON
+    # 进入训练页时优先用这个，没有则回退到按 task_type 写死的默认值
+    last_train_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

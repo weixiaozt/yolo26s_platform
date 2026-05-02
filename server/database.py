@@ -85,6 +85,12 @@ def init_db():
             "NOT NULL DEFAULT 'seg' COMMENT '任务类型: seg=分割, det=目标检测, cls=图像分类, obb=旋转目标检测'",
             "projects.task_type 扩展 obb",
         ),
+        # 项目级训练参数缓存（用户改完点"保存为默认"后存这里）
+        (
+            "ALTER TABLE projects ADD COLUMN last_train_config JSON NULL "
+            "COMMENT '上次训练参数缓存（用户保存为默认）'",
+            "projects.last_train_config",
+        ),
     ]
     for sql, label in migrations:
         with engine.connect() as conn:

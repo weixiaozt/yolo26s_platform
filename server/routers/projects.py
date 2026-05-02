@@ -125,6 +125,26 @@ def update_project(project_id: int, body: ProjectUpdate, db: Session = Depends(g
     return project
 
 
+@router.put("/{project_id}/train-config-cache")
+def save_train_config_cache(
+    project_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    """
+    保存项目级训练参数缓存（用户在训练配置页点"保存为默认"时调用）。
+
+    body 是整个 TrainConfig 表单的 JSON，下次进入训练页直接加载。
+    传 null 或 {} 表示清空。
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    project.last_train_config = body or None
+    db.commit()
+    return {"ok": True, "saved_at": project.updated_at.isoformat() if project.updated_at else None}
+
+
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: int, db: Session = Depends(get_db)):
     """删除项目（级联删除所有关联数据）"""

@@ -57,6 +57,7 @@ class ProjectOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     defect_classes: list[DefectClassOut] = []
+    last_train_config: Optional[dict] = None
     model_config = {"from_attributes": True}
 
 

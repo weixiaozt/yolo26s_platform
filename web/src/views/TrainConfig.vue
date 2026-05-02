@@ -9,6 +9,12 @@
         <el-button @click="router.push(`/project/${id}/train/monitor`)">
           查看训练监控
         </el-button>
+        <el-button @click="restoreDefaults">
+          <el-icon><RefreshLeft /></el-icon> 恢复默认值
+        </el-button>
+        <el-button type="success" @click="saveAsDefault" :loading="savingDefaults">
+          <el-icon><Document /></el-icon> 保存为默认
+        </el-button>
         <el-button type="primary" size="large" @click="startTrain" :loading="submitting">
           <el-icon><VideoPlay /></el-icon> 提交训练任务
         </el-button>
@@ -32,15 +38,22 @@
               <el-form-item label="继承模型">
                 <el-select v-model="resumeTaskId" placeholder="选择历史训练任务" style="width:100%">
                   <el-option v-for="t in completedTasks" :key="t.id"
-                    :label="`${t.task_name} (mAP ${((t.best_map50||0)*100).toFixed(1)}%)`"
+                    :label="`${t.task_name} (mAP ${((t.best_map50||0)*100).toFixed(1)}%)${t.status==='cancelled' ? ' [取消@'+t.current_epoch+'/'+t.epochs+']' : ''}`"
                     :value="t.id" />
                 </el-select>
               </el-form-item>
               <el-form-item label="权重选择">
                 <el-radio-group v-model="resumeModelType">
-                  <el-radio label="best">best.pt（最佳）</el-radio>
-                  <el-radio label="last">last.pt（最终）</el-radio>
+                  <el-radio label="best">
+                    best.pt（最佳）
+                    <el-tag v-if="recommendedModelType==='best'" type="success" size="small" effect="plain" style="margin-left:6px">推荐</el-tag>
+                  </el-radio>
+                  <el-radio label="last">
+                    last.pt（最终）
+                    <el-tag v-if="recommendedModelType==='last'" type="success" size="small" effect="plain" style="margin-left:6px">推荐</el-tag>
+                  </el-radio>
                 </el-radio-group>
+                <span v-if="recommendReason" class="hint">{{ recommendReason }}</span>
               </el-form-item>
               <el-alert v-if="classCountWarning" type="warning" :closable="false" style="margin-bottom:8px">
                 <div style="font-size:12px">{{ classCountWarning }}</div>
@@ -274,14 +287,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api/index'
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
 const submitting = ref(false)
+const savingDefaults = ref(false)
 const taskName = ref('训练任务-' + new Date().toLocaleDateString('zh-CN'))
 
 // 训练模式
@@ -292,11 +306,48 @@ const completedTasks = ref<any[]>([])
 const currentClassCount = ref(0)
 const taskType = ref<'seg'|'det'|'cls'|'obb'>('seg')
 
+// ---- 默认参数（按 task_type 分支生成）----
+function getBaseDefaults() {
+  return {
+    model_name: 'yolo26s-seg',
+    epochs: 200, batch_size: 8, patience: 50, device: '0',
+    lr0: 0.01, lrf: 0.01, momentum: 0.937, weight_decay: 0.0005,
+    warmup_epochs: 3, warmup_momentum: 0.8,
+    train_ratio: 0.8, oversample_factor: 5,
+    hsv_h: 0.015, hsv_s: 0.7, hsv_v: 0.4,
+    degrees: 180, translate: 0.1, scale: 0.5, shear: 0.0,
+    flipud: 0.5, fliplr: 0.5,
+    mosaic: 0.5, copy_paste: 0.5, mixup: 0.1, erasing: 0.1, close_mosaic: 30,
+    use_morphology: true, dilate_kernel: 3, erode_kernel: 3, mask_dilate_kernel: 0,
+    crop_size: 640,
+  } as Record<string, any>
+}
+
+function defaultsForTaskType(tt: string): Record<string, any> {
+  const d = getBaseDefaults()
+  if (tt === 'det') {
+    // det 默认 small + 关形态学；几何/混合增强对 det 调保守
+    Object.assign(d, { model_name: 'yolo26s.pt', use_morphology: false, train_ratio: 0.85,
+      copy_paste: 0, mixup: 0, degrees: 20, flipud: 0.5, mosaic: 0.3, epochs: 300, patience: 80 })
+  } else if (tt === 'cls') {
+    // cls 走 ImageNet 标准 224；几何/混合增强大多关掉（工业纹理依赖方向）
+    Object.assign(d, { model_name: 'yolo11s-cls.pt', use_morphology: false, train_ratio: 0.8,
+      crop_size: 224, degrees: 0, flipud: 0, fliplr: 0.5, translate: 0.05, scale: 0.2, shear: 0,
+      mosaic: 0, copy_paste: 0, mixup: 0, erasing: 0, epochs: 100, patience: 30 })
+  } else if (tt === 'obb') {
+    // OBB 受益于任意旋转
+    Object.assign(d, { model_name: 'yolo11s-obb.pt', use_morphology: false, train_ratio: 0.85,
+      degrees: 180, mosaic: 0.3, copy_paste: 0, mixup: 0 })
+  }
+  return d
+}
+
+const c = ref<Record<string, any>>(getBaseDefaults())
+
 const classCountWarning = computed(() => {
   if (trainMode.value !== 'finetune' || !resumeTaskId.value) return ''
   const prev = completedTasks.value.find((t: any) => t.id === resumeTaskId.value)
   if (!prev || !prev.config) return ''
-  // 从上次训练配置中推断类别数（如果有记录）
   const prevNc = prev.num_classes
   if (prevNc && currentClassCount.value > 0 && prevNc !== currentClassCount.value) {
     return `⚠ 当前项目有 ${currentClassCount.value} 个类别，上次训练为 ${prevNc} 个类别。类别数量不同无法继承训练，请选择"从头训练"。`
@@ -304,114 +355,112 @@ const classCountWarning = computed(() => {
   return ''
 })
 
+// ---- best vs last 推荐 ----
+const recommendedModelType = ref<'best' | 'last'>('best')
+const recommendReason = ref('')
+function recommendModelType(task: any): { type: 'best' | 'last'; reason: string } {
+  if (!task) return { type: 'best', reason: '' }
+  if (task.status === 'completed') {
+    return { type: 'best', reason: '训练已完成，best.pt 是最优收敛权重' }
+  }
+  if (task.status === 'cancelled') {
+    const ep = task.current_epoch || 0
+    const total = task.epochs || 0
+    const progress = total > 0 ? ep / total : 0
+    if (progress < 0.3) {
+      return { type: 'last', reason: `训练只到 ${ep}/${total}（${(progress*100).toFixed(0)}%），best 还没充分收敛，建议 last.pt 接着学` }
+    }
+    return { type: 'best', reason: `已训练 ${ep}/${total}，best.pt 已稳定可用` }
+  }
+  return { type: 'best', reason: '' }
+}
+
+// ---- 切到继承训练 / 切换历史任务时，加载老 config + 推荐 ----
+function applyResumeTask(taskId: number | null) {
+  if (!taskId) return
+  const task = completedTasks.value.find(t => t.id === taskId)
+  if (!task) return
+  const cfg = task.config ? { ...task.config } : {}
+  // 不带过来的字段：当次特殊的、项目级的（项目级在项目编辑页改）
+  for (const k of ['train_mode', 'resume_from_task_id', 'resume_model_type',
+                   'class_names', 'task_type',
+                   'resize_h', 'resize_w', 'crop_size', 'overlap']) {
+    delete cfg[k]
+  }
+  if (Object.keys(cfg).length > 0) {
+    Object.assign(c.value, cfg)
+    ElMessage.info(`已加载「${task.task_name}」的训练参数`)
+  }
+  const rec = recommendModelType(task)
+  recommendedModelType.value = rec.type
+  recommendReason.value = rec.reason
+  resumeModelType.value = rec.type
+}
+
+watch(resumeTaskId, (id) => {
+  if (trainMode.value === 'finetune') applyResumeTask(id)
+})
+
+watch(trainMode, (m) => {
+  if (m === 'finetune') {
+    applyResumeTask(resumeTaskId.value)
+  } else {
+    recommendReason.value = ''
+  }
+})
+
 onMounted(async () => {
-  // 加载项目类别数和任务类型
   try {
     const { data: proj } = await api.get(`/projects/${props.id}`)
     currentClassCount.value = proj.defect_classes?.length || 0
     taskType.value = (proj.task_type || 'seg') as 'seg' | 'det' | 'cls' | 'obb'
-    // 检测项目使用不同的默认模型和参数
-    if (taskType.value === 'det') {
-      // 默认改 small：nano 召回弱，对工业/航拍小目标效果差
-      c.value.model_name = 'yolo26s.pt'
-      c.value.use_morphology = false       // 检测不需要形态学
-      c.value.train_ratio = 0.85
-      // det 不需要这些
-      c.value.copy_paste = 0    // 仅对 seg 有效，传了浪费
-      c.value.mixup = 0          // 对小目标 det 通常有害
-      c.value.degrees = 20       // HBB 框轴对齐，大角度旋转会让 bbox 膨胀，标签变脏
-      c.value.flipud = 0.5       // 上下翻转一般可保留
-      c.value.mosaic = 0.3       // 适中即可
-      c.value.epochs = 300       // 小数据多迭代
-      c.value.patience = 80
-    } else if (taskType.value === 'cls') {
-      c.value.model_name = 'yolo11s-cls.pt'  // 分类默认 small
-      c.value.use_morphology = false
-      c.value.train_ratio = 0.8
-      // 分类专属：imgsz=224（YOLO11-cls 在 ImageNet 上的标准尺寸）
-      // 工业小图放大到 640 会引入大量插值伪影 → 模型学不到真实纹理
-      c.value.crop_size = 224
-      // 分类不需要的参数置 0/默认
-      c.value.degrees = 0       // 工业 cls 常依赖纹理方向，关掉旋转
-      c.value.flipud = 0        // 关掉上下翻转
-      c.value.fliplr = 0.5      // 仅保留水平翻转
-      c.value.translate = 0.05  // 平移幅度调小
-      c.value.scale = 0.2       // 缩放幅度调小
-      c.value.shear = 0
-      c.value.mosaic = 0
-      c.value.copy_paste = 0
-      c.value.mixup = 0
-      c.value.erasing = 0
-      c.value.epochs = 100      // cls 收敛快
-      c.value.patience = 30
-    } else if (taskType.value === 'obb') {
-      c.value.model_name = 'yolo11s-obb.pt'  // OBB 默认 small
-      c.value.use_morphology = false
-      c.value.train_ratio = 0.85
-      // OBB 受益于任意旋转，保留 degrees=180；但 copy_paste/mosaic 改保守值
-      c.value.degrees = 180
-      c.value.mosaic = 0.3
-      c.value.copy_paste = 0
-      c.value.mixup = 0
+    const defaults = defaultsForTaskType(taskType.value)
+    if (proj.last_train_config && Object.keys(proj.last_train_config).length > 0) {
+      // 用户点过"保存为默认"：缓存覆盖在默认之上
+      Object.assign(c.value, defaults, proj.last_train_config)
+      ElMessage.info('已加载上次保存的训练参数')
+    } else {
+      Object.assign(c.value, defaults)
     }
   } catch {}
-  // 加载已完成的训练任务
   try {
     const { data } = await api.get(`/projects/${props.id}/train/tasks`)
-    completedTasks.value = (data || []).filter((t: any) => t.status === 'completed')
+    // completed + cancelled 都可继承（cancelled 任务硬盘上仍有 best.pt/last.pt）
+    completedTasks.value = (data || []).filter((t: any) =>
+      (t.status === 'completed' || t.status === 'cancelled') && (t.best_model_path || t.last_model_path)
+    )
     if (completedTasks.value.length > 0) resumeTaskId.value = completedTasks.value[0].id
   } catch {}
 })
 
-// 针对硅片缺陷检测优化的默认参数
-const c = ref({
-  // 基本
-  model_name: 'yolo26s-seg',
-  epochs: 200,
-  batch_size: 8,
-  patience: 50,
-  device: '0',
-  // 学习率
-  lr0: 0.01,
-  lrf: 0.01,
-  momentum: 0.937,
-  weight_decay: 0.0005,
-  warmup_epochs: 3,
-  warmup_momentum: 0.8,
-  // 数据划分
-  train_ratio: 0.8,
-  oversample_factor: 5,
-  // 颜色增广
-  hsv_h: 0.015,
-  hsv_s: 0.7,
-  hsv_v: 0.4,
-  // 几何增广
-  degrees: 180,
-  translate: 0.1,
-  scale: 0.5,
-  shear: 0.0,
-  flipud: 0.5,
-  fliplr: 0.5,
-  // 高级增广
-  mosaic: 0.5,
-  copy_paste: 0.5,
-  mixup: 0.1,
-  erasing: 0.1,
-  close_mosaic: 30,
-  // 形态学预处理
-  use_morphology: true,
-  dilate_kernel: 3,
-  erode_kernel: 3,
-  mask_dilate_kernel: 0,
-})
+// ---- 保存为默认 / 恢复默认 按钮 ----
+async function saveAsDefault() {
+  savingDefaults.value = true
+  try {
+    await api.put(`/projects/${props.id}/train-config-cache`, c.value)
+    ElMessage.success('已保存为该项目默认参数')
+  } catch {
+    ElMessage.error('保存失败')
+  } finally { savingDefaults.value = false }
+}
+
+async function restoreDefaults() {
+  try {
+    await ElMessageBox.confirm(
+      '将表单恢复到该任务类型的内置默认值（不会清除已保存的项目默认）。如果想让这套默认生效，请再点「保存为默认」。',
+      '恢复默认值',
+      { type: 'info', confirmButtonText: '恢复', cancelButtonText: '取消' }
+    )
+  } catch { return }
+  Object.assign(c.value, defaultsForTaskType(taskType.value))
+  ElMessage.success('已恢复内置默认值')
+}
 
 async function startTrain() {
-  // 校验：继承训练 + 类别数变化 → 阻止
   if (trainMode.value === 'finetune' && classCountWarning.value) {
     ElMessage.error('类别数量不一致，无法继承训练')
     return
   }
-
   submitting.value = true
   try {
     const config: any = { ...c.value }
