@@ -42,6 +42,13 @@
         <el-button type="success" size="small" @click="showProjectImagesDialog=true" :disabled="!selModel">
           <el-icon><DataLine /></el-icon> 推理训练图
         </el-button>
+
+        <!-- 切割小图（仅 seg 项目） -->
+        <el-button v-if="projectTaskType==='seg'" type="warning" size="small"
+          :disabled="history.length===0 || cropping" :loading="cropping"
+          @click="cropDefects">
+          <el-icon><Scissor /></el-icon> 切割小图
+        </el-button>
       </div>
     </div>
 
@@ -323,8 +330,12 @@ const current = computed(() => history.value.find(r => r.id === selId.value) || 
 interface PendingItem { file: File; url: string }
 const pending = ref<PendingItem[]>([])
 
-// 项目类别（用于 cls GT 对照）
+// 项目类别（用于 cls GT 对照）+ 项目类型（决定"切割小图"按钮是否显示）
 const projectClasses = ref<Array<{class_index:number; name:string; color:string; id:number}>>([])
+const projectTaskType = ref<string>('seg')
+
+// 切割小图状态
+const cropping = ref(false)
 
 // 推理训练图 dialog
 const showProjectImagesDialog = ref(false)
@@ -469,10 +480,11 @@ onMounted(async () => {
     const first = d.find((x: DeviceInfo) => x.available)
     if (first) device.value = first.id
   } catch {}
-  // 加载项目类别（用于 GT 对照）
+  // 加载项目类别 + task_type
   try {
     const { data: proj } = await api.get(`/projects/${props.id}`)
     projectClasses.value = proj.defect_classes || []
+    projectTaskType.value = proj.task_type || 'seg'
   } catch {}
   await loadHistory()
 })
@@ -590,6 +602,56 @@ async function runBatch(tasks: BatchTask[]) {
 }
 
 function cancelInfer() { cancelFlag = true }
+
+// ---- 切割小图（seg 项目，给二级分类模型当训练集） ----
+async function cropDefects() {
+  try {
+    await ElMessageBox.confirm(
+      '将切割本项目所有推理结果中的缺陷小图，按类别打包成 zip 下载到本地。\n\n' +
+      '规则：长边 > 512 缩放到 512×512；长边 < 128 向外膨胀到 128×128；中间档按长边补正方形原样切。\n\n' +
+      'zip 解压后：每个类别一个文件夹，可直接作为 yolo-cls 训练集。',
+      '切割小图',
+      { type: 'info', confirmButtonText: '开始下载', cancelButtonText: '取消' }
+    )
+  } catch { return }
+
+  cropping.value = true
+  try {
+    const resp = await api.post('/inference/crop-defects', null, {
+      params: { project_id: props.id },
+      responseType: 'blob',
+      timeout: 600000,
+    })
+    const blob = resp.data as Blob
+    // 错误响应也是 blob，要先看 content-type 判断
+    if (!blob.type.includes('zip')) {
+      const text = await blob.text()
+      let msg = '切割失败'
+      try { msg = JSON.parse(text).detail || msg } catch {}
+      ElMessage.error(msg)
+      return
+    }
+    // 触发下载
+    const disp = (resp.headers['content-disposition'] as string) || ''
+    const m = disp.match(/filename="([^"]+)"/)
+    const fname = m ? m[1] : `project_${props.id}_crops.zip`
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fname
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.URL.revokeObjectURL(url)
+    const count = resp.headers['x-crop-count']
+    ElMessage.success(`已下载 ${fname}${count ? ` (${count} 张)` : ''}`)
+  } catch (e: any) {
+    const msg = e?.response?.data?.detail || e?.message || '切割失败'
+    ElMessage.error(typeof msg === 'string' ? msg : '切割失败')
+  } finally {
+    cropping.value = false
+  }
+}
 
 async function delRecord(rid: number) {
   await api.delete(`/inference/history/${rid}`)

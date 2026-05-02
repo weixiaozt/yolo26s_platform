@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from ..models.train_task import TrainTask
 from ..models.inference_result import InferenceResult
 from ..models.exported_model import ExportedModel
 from ..models.defect_class import DefectClass
+from ..models.project import Project
 
 _root = str(Path(__file__).parent.parent.parent)
 if _root not in sys.path:
@@ -623,3 +624,138 @@ def clear_history(project_id: int = Query(default=0), db: Session = Depends(get_
         db.delete(r)
     db.commit()
     return {"ok": True, "deleted": len(recs)}
+
+
+# ============================================================
+# 缺陷小图切割（仅 seg 项目，给二级分类模型当训练集）
+# ============================================================
+
+def _crop_defect_for_classifier(img, bbox, target_min: int = 128, target_max: int = 512):
+    """
+    按规则切单个缺陷小图。
+
+    规则：
+    - 长边 > target_max:  以 bbox 中心切 long×long 正方形 → resize 到 target_max
+    - 长边 < target_min:  以 bbox 中心切 target_min×target_min（不缩放，向外膨胀）
+    - 中间:               以 bbox 中心切 long×long 正方形（不缩放，按长边补正方形）
+    边缘越界时窗口往内推保完整；fallback：side 不超过原图最小边。
+
+    Args:
+        img: 原图 ndarray
+        bbox: dict {x1, y1, x2, y2}（推理 detection 里的格式）
+
+    Returns:
+        (crop_ndarray, output_size)  — output_size 用于命名
+    """
+    H, W = img.shape[:2]
+    x1, y1 = int(bbox["x1"]), int(bbox["y1"])
+    x2, y2 = int(bbox["x2"]), int(bbox["y2"])
+    w = max(1, x2 - x1)
+    h = max(1, y2 - y1)
+    long_edge = max(w, h)
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+
+    side = max(long_edge, target_min)
+    side = min(side, min(W, H))  # fallback：原图比目标还小
+
+    # 居中切窗口；超边时往内推
+    x0 = max(0, min(cx - side // 2, W - side))
+    y0 = max(0, min(cy - side // 2, H - side))
+    crop = img[y0:y0 + side, x0:x0 + side]
+
+    if long_edge > target_max:
+        crop = cv2.resize(crop, (target_max, target_max), interpolation=cv2.INTER_AREA)
+        return crop, target_max
+    return crop, side
+
+
+@router.post("/crop-defects")
+def crop_defects_for_classifier(
+    project_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    """
+    遍历项目所有推理记录，按缺陷 bbox 切小图，按类别打包成 zip 下载。
+
+    仅适用于 seg 项目（其他 task_type 返回 400）。
+    用途：给二级分类模型当训练集 — 解压后每个类别一个文件夹，可直接喂 yolo-cls。
+
+    切图规则见 _crop_defect_for_classifier。
+    命名: <类别名>/<类别名>_<输出尺寸>_<序号>.<原图扩展名>
+    """
+    import io
+    import zipfile
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(404, "项目不存在")
+    if project.task_type != "seg":
+        raise HTTPException(400, f"仅实例分割项目支持切割小图，当前 task_type={project.task_type}")
+
+    records = (
+        db.query(InferenceResult)
+        .filter(InferenceResult.project_id == project_id)
+        .order_by(InferenceResult.created_at)
+        .all()
+    )
+    if not records:
+        raise HTTPException(400, "项目下没有推理记录，先做推理")
+
+    counters: dict = {}      # (cls_name, out_size) -> 序号
+    crops: list = []         # [(zip_path, file_bytes)]
+
+    for rec in records:
+        if rec.num_detections == 0 or not rec.detections or not rec.original_path:
+            continue
+        fp = _url_to_disk(rec.original_path)
+        if not fp.exists():
+            continue
+        img = cv2.imread(str(fp), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            continue
+        # 输出格式跟随原图扩展名
+        ext = fp.suffix.lower()
+        if ext not in (".bmp", ".png", ".jpg", ".jpeg"):
+            ext = ".png"
+
+        for det in rec.detections:
+            bbox = det.get("bbox")
+            if not bbox:
+                continue
+            cls_name = det.get("class_name") or f"C{det.get('class_id', 0)}"
+            try:
+                crop, out_size = _crop_defect_for_classifier(img, bbox)
+            except Exception:
+                continue
+            if crop is None or crop.size == 0:
+                continue
+
+            ok, buf = cv2.imencode(ext, crop)
+            if not ok:
+                continue
+
+            key = (cls_name, out_size)
+            idx = counters.get(key, 0)
+            counters[key] = idx + 1
+            zip_name = f"{cls_name}/{cls_name}_{out_size}_{idx}{ext}"
+            crops.append((zip_name, buf.tobytes()))
+
+    if not crops:
+        raise HTTPException(400, "推理记录中没有可切割的缺陷")
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for name, data in crops:
+            zf.writestr(name, data)
+    mem.seek(0)
+
+    return StreamingResponse(
+        mem,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="project_{project_id}_crops_{len(crops)}.zip"',
+            "X-Crop-Count": str(len(crops)),
+            # 不放类别名 header（HTTP header 限 latin-1，中文类名会炸）
+        },
+    )
