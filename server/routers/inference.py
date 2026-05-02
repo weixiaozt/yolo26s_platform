@@ -53,21 +53,31 @@ def _get_model(model_path: str):
 
 @router.get("/models")
 def list_models(project_id: int = Query(default=0), db: Session = Depends(get_db)):
-    """列出项目下可用模型（.pt + 导出格式）"""
+    """
+    列出项目下可用模型（.pt + 导出格式）。
+
+    包括 completed 和 cancelled 两种状态的任务 —— 取消的任务硬盘上仍有
+    best.pt/last.pt（ultralytics 实时写盘），文件存在就算可用。
+    """
     models = []
-    # PyTorch .pt 模型
-    q = db.query(TrainTask).filter(TrainTask.status == "completed")
+    q = db.query(TrainTask).filter(TrainTask.status.in_(["completed", "cancelled"]))
     if project_id > 0:
         q = q.filter(TrainTask.project_id == project_id)
-    tasks = q.order_by(TrainTask.finished_at.desc()).all()
+    # finished_at 取消时可能为 None，用 coalesce 回退到 created_at（兼容 MySQL）
+    tasks = q.order_by(func.coalesce(TrainTask.finished_at, TrainTask.created_at).desc()).all()
     task_ids = [t.id for t in tasks]
     for t in tasks:
-        if t.best_model_path:
+        # cancelled 任务在 label 上加标记，避免用户误用低质量模型
+        suffix = ""
+        if t.status == "cancelled":
+            ep = f"{t.current_epoch}/{t.epochs}" if t.epochs else f"{t.current_epoch}"
+            suffix = f" [取消@epoch {ep}]"
+        if t.best_model_path and Path(t.best_model_path).exists():
             models.append({"task_id": t.id, "model_format": "pytorch",
-                "label": f"{t.task_name} — best.pt", "model_path": t.best_model_path})
-        if t.last_model_path:
+                "label": f"{t.task_name} — best.pt{suffix}", "model_path": t.best_model_path})
+        if t.last_model_path and Path(t.last_model_path).exists():
             models.append({"task_id": t.id, "model_format": "pytorch",
-                "label": f"{t.task_name} — last.pt", "model_path": t.last_model_path})
+                "label": f"{t.task_name} — last.pt{suffix}", "model_path": t.last_model_path})
     # 导出的模型（只显示当前项目的）
     eq = db.query(ExportedModel).filter(ExportedModel.status == "completed", ExportedModel.export_path.isnot(None))
     if task_ids:
