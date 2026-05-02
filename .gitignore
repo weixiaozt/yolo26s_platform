@@ -38,6 +38,10 @@ backups/
 
 # 临时/错误日志
 kernel.errors.txt
+_*.log
+
+# 模型权重（不入库，从 ultralytics 下载即可）
+*.pt
 
 # 打包产物
 *.zip

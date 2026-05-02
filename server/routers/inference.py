@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -28,8 +29,10 @@ _model_cache: dict = {}
 
 
 def _get_model(model_path: str):
-    """加载模型（缓存）。Ultralytics 自动识别格式"""
+    """加载模型（LRU 缓存，容量 4）。"""
     if model_path in _model_cache:
+        # LRU：命中后挪到队尾，避免被错误淘汰
+        _model_cache[model_path] = _model_cache.pop(model_path)
         return _model_cache[model_path]
     # OpenVINO 2026+ 兼容修复
     if "openvino" in model_path.lower():
@@ -43,7 +46,7 @@ def _get_model(model_path: str):
     model = YOLO(model_path)
     _model_cache[model_path] = model
     if len(_model_cache) > 4:
-        del _model_cache[next(iter(_model_cache))]
+        _model_cache.pop(next(iter(_model_cache)))
     return model
 
 
@@ -100,27 +103,29 @@ def list_devices():
 
 def _resolve_class_names(model, project_id: int, db) -> dict:
     """
-    类别名映射 (class_index → name)。
-    优先从项目 DefectClass 表读，查不到时回退到模型训练时存入的 model.names。
-    （之前推断界面显示 "C0" 就是数据库查询为空 + 没有兜底导致的。）
+    类别名映射 (class_index → name)，model.names 优先。
+
+    cls 训练走 ImageFolder，类别 index 是子目录字典序（如 Broken=0, Crack=1, OK=2），
+    与 DB class_index（创建顺序）可能不同；用 DB 映射会把 OK 显示成 Crack。
+    seg/det/obb 的 dataset.yaml 按 DB class_index 写，两边一致。
     """
     cn = {}
-    if project_id and project_id > 0:
+    mn = getattr(model, "names", None)
+    if mn:
+        try:
+            cn = {int(k): str(v) for k, v in (mn.items() if isinstance(mn, dict) else enumerate(mn))}
+        except Exception:
+            cn = {}
+    if not cn and project_id and project_id > 0:
         try:
             dcs = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
             cn = {int(dc.class_index): dc.name for dc in dcs}
         except Exception:
             pass
-    if not cn:
-        mn = getattr(model, "names", None) or {}
-        try:
-            cn = {int(k): str(v) for k, v in (mn.items() if isinstance(mn, dict) else enumerate(mn))}
-        except Exception:
-            pass
     return cn
 
 
-def _run_obb_inference(model, img_array, file, project_id, task_id, conf, iou, device, db):
+def _run_obb_inference(model, img_array, filename, project_id, task_id, conf, iou, device, db):
     """
     OBB 推断：返回每个目标的 4 角点 polygon（图像像素坐标）+ 类别 + 置信度。
     在原图上画旋转四边形作为 overlay。
@@ -194,7 +199,7 @@ def _run_obb_inference(model, img_array, file, project_id, task_id, conf, iou, d
 
     record = InferenceResult(
         project_id=project_id, task_id=task_id,
-        filename=file.filename or "unknown", device=device,
+        filename=filename or "unknown", device=device,
         conf_thresh=conf, iou_thresh=iou, resize_size=0,
         num_detections=len(detections),
         inference_time=round(elapsed, 3),
@@ -220,7 +225,7 @@ def _run_obb_inference(model, img_array, file, project_id, task_id, conf, iou, d
     }
 
 
-def _run_cls_inference(model, img_array, content, file, project_id, task_id, device, db):
+def _run_cls_inference(model, img_array, content, filename, project_id, task_id, device, db):
     """分类推断：返回 top-1 类别 + top-5 概率"""
     import time
     t0 = time.time()
@@ -260,7 +265,7 @@ def _run_cls_inference(model, img_array, content, file, project_id, task_id, dev
     # 复用 InferenceResult 表（detections 字段存 top5）
     record = InferenceResult(
         project_id=project_id, task_id=task_id,
-        filename=file.filename or "unknown", device=device,
+        filename=filename or "unknown", device=device,
         conf_thresh=0.0, iou_thresh=0.0, resize_size=0,
         num_detections=1 if top1_id >= 0 else 0,
         inference_time=round(elapsed, 3),
@@ -289,20 +294,7 @@ def _run_cls_inference(model, img_array, content, file, project_id, task_id, dev
     }
 
 
-@router.post("/run")
-async def run_inference(
-    file: UploadFile = File(...),
-    project_id: int = Form(default=0),
-    task_id: int = Form(default=0),
-    model_path: str = Form(default=""),
-    conf: float = Form(default=0.15),
-    iou: float = Form(default=0.5),
-    resize_size: int = Form(default=0),
-    device: str = Form(default="cpu"),
-    db: Session = Depends(get_db),
-):
-    """单张推断 + 持久化"""
-    # 确定模型路径
+def _resolve_model_path(model_path: str, task_id: int, db: Session) -> str:
     mp = model_path
     if not mp and task_id > 0:
         task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
@@ -310,8 +302,19 @@ async def run_inference(
             mp = task.best_model_path
     if not mp or not Path(mp).exists():
         raise HTTPException(status_code=404, detail="模型文件不存在")
+    return mp
 
-    # 推断配置（从训练任务获取）
+
+def _run_inference_core(
+    img_array, content: bytes, filename: str,
+    project_id: int, task_id: int, mp: str,
+    conf: float, iou: float, resize_size: int, device: str,
+    db: Session,
+) -> dict:
+    """
+    共用推理核心：根据 TrainTask.config.task_type 路由到 cls / obb / seg-det。
+    /run 和 /run-by-image-id 共有的逻辑（任务配置 → 路由 → 持久化）抽出来。
+    """
     crop_size, overlap = 640, 0.2
     use_morphology, dilate_kernel, erode_kernel = False, 3, 3
     task_type = "seg"
@@ -326,32 +329,25 @@ async def run_inference(
             task_type = task.config.get("task_type", "seg")
         if not project_id and task:
             project_id = task.project_id
-    print(f"[推断] task_id={task_id}, task_type={task_type}, use_morphology={use_morphology}")
 
-    # 读取图像
-    content = await file.read()
-    img_array = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_UNCHANGED)
-    if img_array is None:
-        raise HTTPException(status_code=400, detail="无法读取图像")
-
-    # 加载模型
     model = _get_model(mp)
 
-    # 分类推断走简化路径（不滑窗，输入整张图）
+    # 分类：整图 letterbox 到 imgsz；不滑窗
     if task_type == "cls":
         return _run_cls_inference(
             model=model, img_array=img_array, content=content,
-            file=file, project_id=project_id, task_id=task_id,
+            filename=filename, project_id=project_id, task_id=task_id,
             device=device, db=db,
         )
-    # OBB 推断也是整图（不滑窗），输出旋转矩形 4 角点
+    # OBB：整图，输出 4 角点 polygon
     if task_type == "obb":
         return _run_obb_inference(
-            model=model, img_array=img_array, file=file,
+            model=model, img_array=img_array, filename=filename,
             project_id=project_id, task_id=task_id,
             conf=conf, iou=iou, device=device, db=db,
         )
 
+    # seg / det 走滑窗
     from core.inference import infer_single_image
     result = infer_single_image(
         model=model, image=img_array,
@@ -393,7 +389,7 @@ async def run_inference(
     # 持久化
     record = InferenceResult(
         project_id=project_id, task_id=task_id,
-        filename=file.filename or "unknown", device=device,
+        filename=filename, device=device,
         conf_thresh=conf, iou_thresh=iou, resize_size=resize_size,
         num_detections=result["num_detections"],
         inference_time=round(result.get("inference_time", 0), 3),
@@ -418,6 +414,120 @@ async def run_inference(
         "overlay_morph_url": f"{url_pfx}/{rid}_overlay_morph.png" if result.get("overlay_morph") is not None else None,
         "mask_url": record.mask_path,
         "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+
+@router.post("/run")
+async def run_inference(
+    file: UploadFile = File(...),
+    project_id: int = Form(default=0),
+    task_id: int = Form(default=0),
+    model_path: str = Form(default=""),
+    conf: float = Form(default=0.15),
+    iou: float = Form(default=0.5),
+    resize_size: int = Form(default=0),
+    device: str = Form(default="cpu"),
+    db: Session = Depends(get_db),
+):
+    """单张推断 + 持久化（multipart 上传图片）"""
+    mp = _resolve_model_path(model_path, task_id, db)
+    content = await file.read()
+    img_array = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_UNCHANGED)
+    if img_array is None:
+        raise HTTPException(status_code=400, detail="无法读取图像")
+    return _run_inference_core(
+        img_array=img_array, content=content,
+        filename=file.filename or "unknown",
+        project_id=project_id, task_id=task_id, mp=mp,
+        conf=conf, iou=iou, resize_size=resize_size, device=device, db=db,
+    )
+
+
+@router.post("/run-by-image-id")
+def run_inference_by_image_id(
+    image_id: int = Form(...),
+    project_id: int = Form(default=0),
+    task_id: int = Form(default=0),
+    model_path: str = Form(default=""),
+    conf: float = Form(default=0.15),
+    iou: float = Form(default=0.5),
+    resize_size: int = Form(default=0),
+    device: str = Form(default="cpu"),
+    db: Session = Depends(get_db),
+):
+    """
+    按 image_id 推断（"推理训练图"批量场景）。
+    直接从本地读文件，跳过 multipart 上传，避免前端"下载→再上传"的浪费。
+    返回里多带 source_image_id / source_class_id 给前端核对 ground truth。
+    """
+    from ..models.image import Image as ImageModel
+
+    image = db.query(ImageModel).filter(ImageModel.id == image_id).first()
+    if not image:
+        raise HTTPException(404, "图像不存在")
+    if not project_id:
+        project_id = image.project_id
+
+    fp = Path(image.file_path)
+    if not fp.is_absolute():
+        fp = settings.upload_path / image.file_path
+    if not fp.exists():
+        raise HTTPException(404, f"图像文件不存在: {fp}")
+
+    mp = _resolve_model_path(model_path, task_id, db)
+    content = fp.read_bytes()
+    img_array = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_UNCHANGED)
+    if img_array is None:
+        raise HTTPException(400, "无法读取图像")
+
+    result = _run_inference_core(
+        img_array=img_array, content=content,
+        filename=image.filename or fp.name,
+        project_id=project_id, task_id=task_id, mp=mp,
+        conf=conf, iou=iou, resize_size=resize_size, device=device, db=db,
+    )
+    result["source_image_id"] = image_id
+    result["source_class_id"] = image.class_id
+    return result
+
+
+@router.get("/project-images")
+def list_project_images_for_inference(
+    project_id: int = Query(...),
+    status: str = Query(default="labeled", description="labeled / reviewed / all"),
+    class_id: int | None = Query(default=None, description="按 class_id 过滤（cls 项目）"),
+    limit: int = Query(default=100, ge=1, le=2000),
+    sample: bool = Query(default=True, description="True=随机抽样, False=按创建时间倒序"),
+    db: Session = Depends(get_db),
+):
+    """
+    返回项目下用于"推理训练图"的图片列表（仅 id + filename + class_id）。
+    前端拿到列表后循环调 /run-by-image-id。
+    """
+    from ..models.image import Image as ImageModel
+
+    q = db.query(ImageModel).filter(ImageModel.project_id == project_id)
+    if status == "labeled":
+        q = q.filter(ImageModel.status.in_(["labeled", "reviewed"]))
+    elif status == "reviewed":
+        q = q.filter(ImageModel.status == "reviewed")
+    if class_id is not None:
+        q = q.filter(ImageModel.class_id == class_id)
+
+    total = q.count()
+    if sample:
+        # MySQL: ORDER BY RAND() — 单查询完成抽样，不再把所有 id 拉到 Python
+        items = q.order_by(func.rand()).limit(limit).all()
+    else:
+        items = q.order_by(ImageModel.created_at.desc()).limit(limit).all()
+
+    return {
+        "total": total,
+        "returned": len(items),
+        "items": [
+            {"id": img.id, "filename": img.filename, "class_id": img.class_id, "status": img.status}
+            for img in items
+        ],
     }
 
 
