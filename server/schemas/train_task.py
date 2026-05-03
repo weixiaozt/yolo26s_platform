@@ -101,5 +101,7 @@ class EpochLogOut(BaseModel):
     map50_95_b: Optional[float]
     map50_m: Optional[float]
     map50_95_m: Optional[float]
+    top1_acc: Optional[float] = None   # cls top1
+    top5_acc: Optional[float] = None   # cls top5
     lr: Optional[float]
     model_config = {"from_attributes": True}

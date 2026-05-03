@@ -33,6 +33,8 @@ export interface EpochLog {
   map50_95_b: number | null
   map50_m: number | null
   map50_95_m: number | null
+  top1_acc: number | null   // cls 任务 top1 准确率
+  top5_acc: number | null   // cls 任务 top5 准确率
   lr: number | null
 }
 

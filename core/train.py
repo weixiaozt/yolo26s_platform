@@ -368,6 +368,8 @@ def run_train(
                     'val/seg_loss': 'val_seg_loss',
                     'val/cls_loss': 'val_cls_loss',
                     'val/dfl_loss': 'val_dfl_loss',
+                    # cls 任务只有 val/loss（单一分类 loss）
+                    'val/loss': 'val_loss',
                 }
                 for src, dst in val_loss_keys.items():
                     if src in metrics:
@@ -399,7 +401,8 @@ def run_train(
                         if len(df) > 0:
                             last = df.iloc[-1]
                             for col, key in [('val/box_loss','val_box_loss'),('val/seg_loss','val_seg_loss'),
-                                             ('val/cls_loss','val_cls_loss'),('val/dfl_loss','val_dfl_loss')]:
+                                             ('val/cls_loss','val_cls_loss'),('val/dfl_loss','val_dfl_loss'),
+                                             ('val/loss','val_loss'),('train/loss','train_loss')]:
                                 if col in df.columns:
                                     data[key] = float(last[col])
                 except Exception:

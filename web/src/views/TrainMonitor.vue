@@ -108,7 +108,12 @@
             <span style="font-size:12px;color:#999">Epoch {{ epochs.length }} | 蓝=Train 红=Val</span>
           </div>
         </template>
-        <div class="charts-grid">
+        <!-- cls：单一 loss，宽图展示 -->
+        <div v-if="isClsTask" class="chart-box">
+          <div ref="chartClsLoss" style="width:100%;height:320px"></div>
+        </div>
+        <!-- seg/det/obb：四张子图 -->
+        <div v-else class="charts-grid">
           <div class="chart-box">
             <div ref="chartBoxLoss" style="width:100%;height:280px"></div>
           </div>
@@ -127,7 +132,17 @@
       <!-- 验证指标曲线 -->
       <el-card shadow="never" style="margin-bottom:20px">
         <template #header><span style="font-weight:600">验证指标</span></template>
-        <div class="charts-grid">
+        <!-- cls：Top1 / Top5 准确率 -->
+        <div v-if="isClsTask" class="charts-grid">
+          <div class="chart-box">
+            <div ref="chartTop1" style="width:100%;height:280px"></div>
+          </div>
+          <div class="chart-box">
+            <div ref="chartTop5" style="width:100%;height:280px"></div>
+          </div>
+        </div>
+        <!-- seg/det/obb：Precision / Recall / mAP@50 / mAP@50:95 -->
+        <div v-else class="charts-grid">
           <div class="chart-box">
             <div ref="chartPrecision" style="width:100%;height:280px"></div>
           </div>
@@ -172,6 +187,9 @@ const epochs = ref<EpochLog[]>([])
 let pollTimer: any = null
 
 const selectedTask = computed(() => tasks.value.find(t => t.id === selectedTaskId.value))
+
+// 是否分类任务（cls 的指标和 seg/det/obb 不同：单一 loss + Top1/Top5 准确率）
+const isClsTask = computed(() => (selectedTask.value?.config as any)?.task_type === 'cls')
 
 // ========== 训练参数展示 ==========
 const paramsExpanded = ref(true)
@@ -289,6 +307,9 @@ const chartPrecision = ref<HTMLElement>()
 const chartRecall = ref<HTMLElement>()
 const chartMap50 = ref<HTMLElement>()
 const chartMap5095 = ref<HTMLElement>()
+// cls 专用
+const chartTop1 = ref<HTMLElement>()
+const chartTop5 = ref<HTMLElement>()
 const chartLr = ref<HTMLElement>()
 
 let charts: echarts.ECharts[] = []
@@ -365,23 +386,31 @@ function renderCharts() {
   const ep = epochs.value
   const x = ep.map(e => e.epoch + 1)
 
-  // Loss charts
-  renderLossChart(chartBoxLoss.value, 'Box Loss', x,
-    ep.map(e => e.train_box_loss), ep.map(e => e.val_box_loss))
-  renderLossChart(chartSegLoss.value, 'Seg Loss', x,
-    ep.map(e => e.train_seg_loss), ep.map(e => e.val_seg_loss))
-  renderLossChart(chartClsLoss.value, 'Cls Loss', x,
-    ep.map(e => e.train_cls_loss), ep.map(e => e.val_cls_loss))
-  renderLossChart(chartDflLoss.value, 'DFL Loss', x,
-    ep.map(e => e.train_dfl_loss), ep.map(e => e.val_dfl_loss))
+  if (isClsTask.value) {
+    // ---- 分类任务：Cls Loss + Top1 / Top5 ----
+    // 后端已把 train/loss、val/loss 别名落到 train_cls_loss / val_cls_loss
+    renderLossChart(chartClsLoss.value, 'Classification Loss', x,
+      ep.map(e => e.train_cls_loss), ep.map(e => e.val_cls_loss))
+    renderMetricChart(chartTop1.value, 'Top-1 Accuracy', x, ep.map(e => e.top1_acc), '#67C23A')
+    renderMetricChart(chartTop5.value, 'Top-5 Accuracy', x, ep.map(e => e.top5_acc), '#409EFF')
+  } else {
+    // ---- 检测/分割/旋转：4 张 Loss + 4 张 Metric ----
+    renderLossChart(chartBoxLoss.value, 'Box Loss', x,
+      ep.map(e => e.train_box_loss), ep.map(e => e.val_box_loss))
+    renderLossChart(chartSegLoss.value, 'Seg Loss', x,
+      ep.map(e => e.train_seg_loss), ep.map(e => e.val_seg_loss))
+    renderLossChart(chartClsLoss.value, 'Cls Loss', x,
+      ep.map(e => e.train_cls_loss), ep.map(e => e.val_cls_loss))
+    renderLossChart(chartDflLoss.value, 'DFL Loss', x,
+      ep.map(e => e.train_dfl_loss), ep.map(e => e.val_dfl_loss))
 
-  // Metric charts
-  renderMetricChart(chartPrecision.value, 'Precision', x, ep.map(e => e.precision_b), '#409EFF')
-  renderMetricChart(chartRecall.value, 'Recall', x, ep.map(e => e.recall_b), '#E6A23C')
-  renderMetricChart(chartMap50.value, 'mAP@0.5 (Box)', x, ep.map(e => e.map50_b), '#67C23A')
-  renderMetricChart(chartMap5095.value, 'mAP@0.5:0.95 (Box)', x, ep.map(e => e.map50_95_b), '#F56C6C')
+    renderMetricChart(chartPrecision.value, 'Precision', x, ep.map(e => e.precision_b), '#409EFF')
+    renderMetricChart(chartRecall.value, 'Recall', x, ep.map(e => e.recall_b), '#E6A23C')
+    renderMetricChart(chartMap50.value, 'mAP@0.5 (Box)', x, ep.map(e => e.map50_b), '#67C23A')
+    renderMetricChart(chartMap5095.value, 'mAP@0.5:0.95 (Box)', x, ep.map(e => e.map50_95_b), '#F56C6C')
+  }
 
-  // LR chart
+  // LR chart 通用
   renderMetricChart(chartLr.value, 'Learning Rate', x, ep.map(e => e.lr), '#909399')
 }
 

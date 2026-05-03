@@ -193,6 +193,13 @@ def run_training_pipeline(self, task_id: int):
                     .filter(TrainEpochLog.task_id == task_id, TrainEpochLog.epoch == ep)
                     .first()
                 )
+                # cls 任务只有 train/loss + val/loss（单一分类 loss），别名落到 *_cls_loss 列
+                # 这样前端无论 seg/det/obb/cls 都从 cls_loss 列读 loss 曲线即可
+                if data.get("train_loss") is not None and data.get("train_cls_loss") is None:
+                    data["train_cls_loss"] = data["train_loss"]
+                if data.get("val_loss") is not None and data.get("val_cls_loss") is None:
+                    data["val_cls_loss"] = data["val_loss"]
+
                 fields = dict(
                     train_box_loss=data.get("train_box_loss"),
                     train_seg_loss=data.get("train_seg_loss"),
@@ -208,6 +215,8 @@ def run_training_pipeline(self, task_id: int):
                     map50_95_b=data.get("mAP50_95_B"),
                     map50_m=data.get("mAP50_M"),
                     map50_95_m=data.get("mAP50_95_M"),
+                    top1_acc=data.get("top1_acc"),
+                    top5_acc=data.get("top5_acc"),
                     lr=data.get("lr"),
                 )
                 if existing is not None:
