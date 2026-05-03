@@ -29,12 +29,21 @@ router = APIRouter(prefix="/api/inference", tags=["推断服务"])
 _model_cache: dict = {}
 
 
-def _get_model(model_path: str):
-    """加载模型（LRU 缓存，容量 4）。"""
-    if model_path in _model_cache:
-        # LRU：命中后挪到队尾，避免被错误淘汰
-        _model_cache[model_path] = _model_cache.pop(model_path)
-        return _model_cache[model_path]
+# task_type → ultralytics task 名映射
+_TASK_MAP = {"seg": "segment", "det": "detect", "cls": "classify", "obb": "obb"}
+
+
+def _get_model(model_path: str, task_type: str | None = None):
+    """加载模型（LRU 缓存，容量 4）。
+
+    task_type: 我们项目的 task_type（seg/det/cls/obb），用于在加载非 .pt 模型
+    （ONNX / OpenVINO / TensorRT）时显式告诉 ultralytics 是哪种任务，否则
+    它默认按 detect 处理 cls 模型会跑 NMS，报 IndexError。
+    """
+    cache_key = f"{model_path}|{task_type or ''}"
+    if cache_key in _model_cache:
+        _model_cache[cache_key] = _model_cache.pop(cache_key)
+        return _model_cache[cache_key]
     # OpenVINO 2026+ 兼容修复
     if "openvino" in model_path.lower():
         try:
@@ -43,9 +52,25 @@ def _get_model(model_path: str):
                 _sys.modules['openvino.runtime'] = _ov
         except ImportError:
             pass
+
+    # 推断任务类型：调用方传入 > OpenVINO metadata.yaml > 不传（ultralytics 自己猜）
+    explicit_task = _TASK_MAP.get(task_type) if task_type else None
+    if explicit_task is None:
+        try:
+            mp = Path(model_path)
+            meta_path = mp / "metadata.yaml" if mp.is_dir() else None
+            if meta_path and meta_path.exists():
+                import yaml as _yaml
+                meta = _yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
+                t = meta.get("task")
+                if t in ("classify", "detect", "segment", "obb", "pose"):
+                    explicit_task = t
+        except Exception:
+            pass
+
     from ultralytics import YOLO
-    model = YOLO(model_path)
-    _model_cache[model_path] = model
+    model = YOLO(model_path, task=explicit_task) if explicit_task else YOLO(model_path)
+    _model_cache[cache_key] = model
     if len(_model_cache) > 4:
         _model_cache.pop(next(iter(_model_cache)))
     return model
@@ -326,6 +351,22 @@ def _run_inference_core(
     共用推理核心：根据 TrainTask.config.task_type 路由到 cls / obb / seg-det。
     /run 和 /run-by-image-id 共有的逻辑（任务配置 → 路由 → 持久化）抽出来。
     """
+    # ---- 通道归一化 ----
+    # cv2.imdecode(IMREAD_UNCHANGED) 对灰度 BMP 返回 (H,W) 单通道，对 RGBA 返回 (H,W,4)。
+    # 训练时模型固定吃 3 通道 BGR；
+    #   .pt 模型走 ultralytics dataloader 会自动转，
+    #   但 OpenVINO / ONNX backend 不做这一步，会直接报
+    #   "got [1,1,H,W] expecting [1,3,H,W]"。
+    # cls / obb 这里直接 model.predict(img_array)，必须在入口先转 3 通道；
+    # seg / det 走 core/inference.py 自己也会转，重复一次无害。
+    if img_array is not None:
+        if img_array.ndim == 2:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        elif img_array.ndim == 3 and img_array.shape[2] == 4:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
+        elif img_array.ndim == 3 and img_array.shape[2] == 1:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+
     crop_size, overlap = 640, 0.2
     use_morphology, dilate_kernel, erode_kernel = False, 3, 3
     task_type = "seg"
@@ -341,7 +382,13 @@ def _run_inference_core(
         if not project_id and task:
             project_id = task.project_id
 
-    model = _get_model(mp)
+    # 没有 task_id 时（直接选模型推理），尝试从项目 task_type 推
+    if task_type == "seg" and task_id == 0 and project_id > 0:
+        proj = db.query(Project).filter(Project.id == project_id).first()
+        if proj and proj.task_type:
+            task_type = proj.task_type
+
+    model = _get_model(mp, task_type=task_type)
 
     # 分类：整图 letterbox 到 imgsz；不滑窗
     if task_type == "cls":
