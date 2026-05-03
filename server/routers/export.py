@@ -15,6 +15,7 @@ from ..database import get_db, SessionLocal
 from ..config import settings
 from ..models.train_task import TrainTask
 from ..models.exported_model import ExportedModel
+from ..models.project import Project
 
 _root = str(Path(__file__).parent.parent.parent)
 if _root not in sys.path:
@@ -64,25 +65,57 @@ def list_exports(task_id: int = 0, project_id: int = 0, db: Session = Depends(ge
 
 @router.get("/tasks")
 def list_exportable_tasks(project_id: int = 0, db: Session = Depends(get_db)):
-    """列出可导出的训练任务（按项目过滤）"""
-    q = db.query(TrainTask).filter(TrainTask.status == "completed")
+    """列出可导出的训练任务（按项目过滤）
+
+    放宽过滤：completed / cancelled / failed 都可能产出有效的 best.pt / last.pt
+    （Ultralytics 每个 epoch 都会保存），只要文件物理存在就允许导出。
+    """
+    q = db.query(TrainTask).filter(
+        TrainTask.status.in_(("completed", "cancelled", "failed", "training", "exporting"))
+    )
     if project_id > 0:
         q = q.filter(TrainTask.project_id == project_id)
-    tasks = q.order_by(TrainTask.finished_at.desc()).all()
+    tasks = q.order_by(TrainTask.id.desc()).all()
+
+    # 解析项目 task_type（用于前端 imgsz 默认值与字段显隐）
+    proj_task_type = None
+    if project_id > 0:
+        proj = db.query(Project).filter(Project.id == project_id).first()
+        if proj:
+            proj_task_type = proj.task_type
+
     result = []
     for t in tasks:
         models = []
-        if t.best_model_path:
+        if t.best_model_path and Path(t.best_model_path).exists():
             models.append({"type": "best", "path": t.best_model_path})
-        if t.last_model_path:
+        if t.last_model_path and Path(t.last_model_path).exists():
             models.append({"type": "last", "path": t.last_model_path})
-        if models:
-            result.append({
-                "task_id": t.id,
-                "task_name": t.task_name,
-                "models": models,
-                "finished_at": t.finished_at.isoformat() if t.finished_at else None,
-            })
+        if not models:
+            continue
+
+        cfg = t.config or {}
+        # cls 项目固定 224；其它项目优先用 config.imgsz，没有则 640
+        if proj_task_type == "cls":
+            cfg_imgsz = 224
+        else:
+            cfg_imgsz = cfg.get("imgsz") if isinstance(cfg, dict) else None
+            if not cfg_imgsz:
+                cfg_imgsz = 640
+
+        result.append({
+            "task_id": t.id,
+            "task_name": t.task_name,
+            "task_type": proj_task_type,
+            "status": t.status,
+            "best_map50": t.best_map50,
+            "current_epoch": t.current_epoch,
+            "epochs": t.epochs,
+            "imgsz": cfg_imgsz,
+            "models": models,
+            "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        })
     return result
 
 
@@ -96,6 +129,11 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
     src_path = task.best_model_path if req.source_type == "best" else task.last_model_path
     if not src_path or not Path(src_path).exists():
         raise HTTPException(status_code=404, detail="模型文件不存在")
+
+    # 分类模型固定 imgsz=224（YOLO11-cls 标准），与训练保持一致，避免导出形状错配
+    proj = db.query(Project).filter(Project.id == task.project_id).first()
+    if proj and proj.task_type == "cls" and req.imgsz != 224:
+        req.imgsz = 224
 
     # 检查是否已有相同导出
     existing = db.query(ExportedModel).filter(

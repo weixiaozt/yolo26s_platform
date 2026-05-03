@@ -13,7 +13,21 @@
       <el-form label-width="120px" label-position="left" style="max-width:600px">
         <el-form-item label="训练任务">
           <el-select v-model="selTaskId" placeholder="选择训练任务" style="width:100%" @change="onTaskChange">
-            <el-option v-for="t in tasks" :key="t.task_id" :label="t.task_name" :value="t.task_id" />
+            <el-option
+              v-for="t in tasks"
+              :key="t.task_id"
+              :label="`#${t.task_id} ${t.task_name}`"
+              :value="t.task_id"
+            >
+              <div style="display:flex;justify-content:space-between;gap:12px;align-items:center">
+                <span>#{{ t.task_id }} {{ t.task_name }}</span>
+                <span style="font-size:12px;color:#909399;display:flex;gap:8px;align-items:center">
+                  <el-tag size="small" :type="taskStatusType(t.status)">{{ statusText(t.status) }}</el-tag>
+                  <span v-if="t.best_map50 != null">mAP50={{ (t.best_map50 * 100).toFixed(1) }}%</span>
+                  <span v-else-if="t.current_epoch">{{ t.current_epoch }}/{{ t.epochs }}ep</span>
+                </span>
+              </div>
+            </el-option>
           </el-select>
         </el-form-item>
         <el-form-item label="模型权重">
@@ -44,9 +58,13 @@
             </el-radio-button>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="输入尺寸">
+        <el-form-item v-if="!isClsTask" label="输入尺寸">
           <el-input-number v-model="imgsz" :min="320" :max="1280" :step="32" />
           <span style="font-size:12px;color:#909399;margin-left:8px">与训练时一致（通常 640）</span>
+        </el-form-item>
+        <el-form-item v-else label="输入尺寸">
+          <el-tag size="small" type="info">224 ×224（分类模型固定）</el-tag>
+          <span style="font-size:12px;color:#909399;margin-left:8px">YOLO11-cls 标准输入尺寸，无需调整</span>
         </el-form-item>
         <el-form-item label="精度">
           <el-radio-group v-model="precision">
@@ -168,7 +186,19 @@ import api from '../api/index'
 const props = defineProps<{ id: string }>()
 const router = useRouter()
 
-interface TaskInfo { task_id:number; task_name:string; models:{type:string;path:string}[] }
+interface TaskInfo {
+  task_id:number
+  task_name:string
+  task_type:string|null
+  status:string
+  best_map50:number|null
+  current_epoch:number
+  epochs:number
+  imgsz:number
+  models:{type:string;path:string}[]
+  finished_at:string|null
+  created_at:string|null
+}
 interface ExportInfo { id:number; task_id:number; source_type:string; export_format:string; export_path:string|null; file_size_mb:number; imgsz:number; half:boolean; status:string; error_message:string|null; created_at:string|null }
 
 const tasks = ref<TaskInfo[]>([])
@@ -200,7 +230,10 @@ onMounted(async () => {
 async function loadTasks() {
   const { data } = await api.get('/export/tasks', { params: { project_id: props.id } })
   tasks.value = data
-  if (data.length > 0 && !selTaskId.value) selTaskId.value = data[0].task_id
+  if (data.length > 0 && !selTaskId.value) {
+    selTaskId.value = data[0].task_id
+    if (data[0].imgsz) imgsz.value = data[0].imgsz
+  }
 }
 
 async function loadExports() {
@@ -218,7 +251,27 @@ async function loadExports() {
   }
 }
 
-function onTaskChange() { sourceType.value = 'best' }
+function onTaskChange() {
+  sourceType.value = 'best'
+  const t = tasks.value.find(x => x.task_id === selTaskId.value)
+  if (t && t.imgsz) imgsz.value = t.imgsz
+}
+
+// 当前选中任务是否为分类项目（用于隐藏输入尺寸选项）
+const isClsTask = computed(() => {
+  const t = tasks.value.find(x => x.task_id === selTaskId.value)
+  return t?.task_type === 'cls'
+})
+
+function taskStatusType(s: string) {
+  return ({
+    completed: 'success',
+    cancelled: 'info',
+    failed: 'danger',
+    training: 'warning',
+    exporting: 'warning',
+  } as any)[s] || 'info'
+}
 
 async function startExport() {
   if (!selTaskId.value) return
@@ -244,7 +297,17 @@ async function deleteExport(id: number) {
 
 function fmtTagType(fmt: string) { return ({ onnx:'', openvino:'success', tensorrt:'warning' } as any)[fmt] || 'info' }
 function statusType(s: string) { return ({ exporting:'warning', completed:'success', failed:'danger' } as any)[s] || 'info' }
-function statusText(s: string) { return ({ exporting:'转换中', completed:'完成', failed:'失败' } as any)[s] || s }
+function statusText(s: string) {
+  return ({
+    pending: '待运行',
+    preparing: '准备中',
+    training: '训练中',
+    exporting: '转换中',
+    completed: '完成',
+    failed: '失败',
+    cancelled: '已取消',
+  } as any)[s] || s
+}
 
 function downloadPt(taskId: number, modelType: string) {
   window.open(`/api/export/download/pt/${taskId}/${modelType}`, '_blank')
