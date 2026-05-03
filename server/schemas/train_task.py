@@ -20,7 +20,7 @@ class TrainConfig(BaseModel):
 
     # 基本训练
     epochs: int = Field(default=200, ge=1, le=2000)
-    batch_size: int = Field(default=16, ge=1, le=128)
+    batch_size: int = Field(default=16, ge=1, le=512)   # 大显存机器（≥32G）+ cls 224 可上 256~512
     patience: int = Field(default=50, ge=0)
     device: str = Field(default="0")
 

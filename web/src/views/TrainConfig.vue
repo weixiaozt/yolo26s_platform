@@ -112,8 +112,8 @@
               <span class="hint">训练轮数，建议 150~300</span>
             </el-form-item>
             <el-form-item label="Batch Size">
-              <el-input-number v-model="c.batch_size" :min="1" :max="128" />
-              <span class="hint">显存不够就调小（4/8）</span>
+              <el-input-number v-model="c.batch_size" :min="1" :max="512" />
+              <span class="hint">6G→8/16，16G→32~64，32G→64~128（cls 可翻倍）</span>
             </el-form-item>
             <el-form-item label="早停 Patience">
               <el-input-number v-model="c.patience" :min="0" :max="500" />
