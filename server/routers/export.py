@@ -28,7 +28,7 @@ class ExportRequest(BaseModel):
     task_id: int
     source_type: str = Field(default="best")           # best / last
     export_format: str = Field(default="onnx")          # onnx / openvino / tensorrt
-    imgsz: int = Field(default=640, ge=320, le=1280)
+    imgsz: int = Field(default=640, ge=64, le=1280)   # 分类项目用 224，下限放宽到 64
     half: bool = Field(default=False)                    # FP16
     int8: bool = Field(default=False)                    # INT8 量化（仅 OpenVINO）
 
