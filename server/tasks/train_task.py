@@ -315,6 +315,27 @@ def run_training_pipeline(self, task_id: int):
     except Exception as e:
         task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
         if task:
+            # 用户已经 cancel 了：trainer 退出时偶发会在收尾（plot_metrics、保存
+            # 元数据等）抛异常（如某些机器 matplotlib FreeType 加载字体失败），
+            # 这种 case 模型权重通常已落盘，应保留 cancelled 状态，从磁盘扫回
+            # best.pt / last.pt，不要把状态硬改成 failed。
+            if task.status == "cancelled":
+                try:
+                    run_root = Path(settings.runs_path) / f"task_{task_id}"
+                    for p in run_root.rglob("best.pt"):
+                        task.best_model_path = str(p)
+                        break
+                    for p in run_root.rglob("last.pt"):
+                        task.last_model_path = str(p)
+                        break
+                except Exception:
+                    pass
+                task.error_message = f"[已取消，trainer 收尾告警] {str(e)}"
+                task.finished_at = datetime.now()
+                db.commit()
+                return {"status": "cancelled", "warning": str(e)}
+
+            # 真正训练失败
             task.status = "failed"
             task.error_message = f"{str(e)}\n{traceback.format_exc()}"
             task.finished_at = datetime.now()
