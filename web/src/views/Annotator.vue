@@ -275,18 +275,33 @@ function subtractEraserFromAnnotations(eraserPath:{x:number;y:number}[],eraserWi
 // ================================================================
 // 初始化
 // ================================================================
+let resizeDebounce:any=null
+function onWindowResize(){
+  clearTimeout(resizeDebounce)
+  resizeDebounce=setTimeout(()=>{
+    if(canvas&&canvasAreaRef.value){
+      canvas.setWidth(canvasAreaRef.value.clientWidth)
+      canvas.setHeight(canvasAreaRef.value.clientHeight)
+      zoomFit()
+    }
+  },200)
+}
+
 onMounted(async()=>{
   await loadProject();await loadImageList();initCanvas();await loadImageAndAnnotations()
   window.addEventListener('keydown',onKD);window.addEventListener('keyup',onKU)
   window.addEventListener('beforeunload',onBeforeUnload)
+  window.addEventListener('resize',onWindowResize)
   rootRef.value?.focus()
 })
 onBeforeUnmount(async ()=>{
   // 组件卸载前 flush 未保存改动
   if(dirty.value){try{await handleSave({silent:true,immediate:true})}catch{}}
   if(autoSaveTimer)clearTimeout(autoSaveTimer)
+  if(resizeDebounce)clearTimeout(resizeDebounce)
   window.removeEventListener('keydown',onKD);window.removeEventListener('keyup',onKU)
   window.removeEventListener('beforeunload',onBeforeUnload)
+  window.removeEventListener('resize',onWindowResize)
   if(canvas)canvas.dispose()
 })
 
@@ -948,7 +963,7 @@ function clsName(cid:number){return defectClasses.value.find(c=>c.id===cid)?.nam
 function cntCls(cid:number){return annotations.value.filter(a=>a.class_id===cid).length}
 function stText(s:string){return({unlabeled:'未标注',labeling:'标注中',labeled:'已标注',reviewed:'OK'})[s]||s}
 function imgSC(img:ImageInfo){return{'sc-u':img.status==='unlabeled','sc-l':img.status==='labeled','sc-r':img.status==='reviewed'}}
-let rt:any;window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(()=>{if(canvas&&canvasAreaRef.value){canvas.setWidth(canvasAreaRef.value.clientWidth);canvas.setHeight(canvasAreaRef.value.clientHeight);zoomFit()}},200)})
+// resize 监听器在 onMounted / onBeforeUnmount 里配对管理（见上方），避免每次进入标注页都泄漏一个监听器
 </script>
 
 <style scoped>
