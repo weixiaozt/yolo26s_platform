@@ -547,9 +547,18 @@ def run_inference_by_image_id(
     if not project_id:
         project_id = image.project_id
 
+    # 与 get_image_file 一致：DB-stored file_path 走 upload_path 拼接 + 边界校验，
+    # 防 DB 被改后通过该端点读取 STORAGE_ROOT 之外的任意文件
+    upload_root = settings.upload_path.resolve()
     fp = Path(image.file_path)
-    if not fp.is_absolute():
-        fp = settings.upload_path / image.file_path
+    if fp.is_absolute():
+        fp = fp.resolve()
+    else:
+        fp = (settings.upload_path / image.file_path).resolve()
+    try:
+        fp.relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(400, "非法路径")
     if not fp.exists():
         raise HTTPException(404, f"图像文件不存在: {fp}")
 
