@@ -173,6 +173,7 @@ def _convert_copy(
     src_images = db.query(Image).filter(Image.project_id == src.id).all()
     image_id_map: dict[int, int] = {}
     img_count = 0
+    _hex_chars = set("0123456789abcdef")
     for img in src_images:
         # 物理文件路径（兼容相对路径与绝对路径）
         src_fp = Path(img.file_path)
@@ -183,9 +184,15 @@ def _convert_copy(
 
         # 新文件名带新 uuid，避免冲突
         original_basename = Path(img.file_path).name
-        # 移除原 uuid 前缀（如果有），保留可读名
-        if "_" in original_basename and len(original_basename.split("_")[0]) == 8:
-            tail = "_".join(original_basename.split("_")[1:])
+        # 移除原 uuid 前缀（如果有），保留可读名。
+        # 必须同时校验前缀是 8 位 *十六进制*，否则用户上传名 "abcdefgh_xxx.png"
+        # 会被误剥成 "xxx.png"。
+        if "_" in original_basename:
+            prefix = original_basename.split("_", 1)[0]
+            if len(prefix) == 8 and set(prefix.lower()).issubset(_hex_chars):
+                tail = original_basename.split("_", 1)[1]
+            else:
+                tail = original_basename
         else:
             tail = original_basename
         new_basename = f"{uuid.uuid4().hex[:8]}_{tail}"
