@@ -3,12 +3,17 @@
 项目管理 API
 """
 
+import logging
+import os
+import shutil
 import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
+
+log = logging.getLogger(__name__)
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -156,7 +161,7 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{project_id}/export-package")
-def export_package(project_id: int, db: Session = Depends(get_db)):
+def export_package(project_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """导出项目为 ZIP（仅已标注图片）"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -169,9 +174,12 @@ def export_package(project_id: int, db: Session = Depends(get_db)):
     try:
         export_project_to_zip(project_id, db, out_path)
     except Exception as e:
-        import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        log.exception("export_project_to_zip failed for project_id=%s", project_id)
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
+
+    # 让 FileResponse 写完后再把临时目录删掉，避免泄漏
+    background_tasks.add_task(shutil.rmtree, str(tmp_dir), ignore_errors=True)
 
     download_name = f"{project.name}_export.zip"
     return FileResponse(
@@ -188,8 +196,12 @@ async def import_package(file: UploadFile = File(...), db: Session = Depends(get
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="请上传 ZIP 文件")
 
-    tmp_path = Path(tempfile.mktemp(suffix=".zip"))
+    # mkstemp 是原子创建（O_EXCL），避免 mktemp 的 race condition
+    fd, tmp_str = tempfile.mkstemp(suffix=".zip", prefix="proj_import_")
+    tmp_path = Path(tmp_str)
     try:
+        # mkstemp 返回的 fd 我们不直接用，下面用 write_bytes 写入路径
+        os.close(fd)
         content = await file.read()
         tmp_path.write_bytes(content)
 
@@ -199,8 +211,8 @@ async def import_package(file: UploadFile = File(...), db: Session = Depends(get
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        import traceback
-        raise HTTPException(status_code=500, detail=f"导入失败: {e}\n{traceback.format_exc()}")
+        log.exception("import_project_from_zip failed for upload=%s", file.filename)
+        raise HTTPException(status_code=500, detail=f"导入失败: {e}")
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -230,8 +242,8 @@ def convert_task_type(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        import traceback
-        raise HTTPException(status_code=500, detail=f"转换失败: {e}\n{traceback.format_exc()}")
+        log.exception("convert_project_task_type failed project_id=%s target=%s", project_id, target_type)
+        raise HTTPException(status_code=500, detail=f"转换失败: {e}")
 
 
 @router.post("/{project_id}/classes", response_model=DefectClassOut, status_code=201)
