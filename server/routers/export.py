@@ -135,16 +135,20 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
     if proj and proj.task_type == "cls" and req.imgsz != 224:
         req.imgsz = 224
 
-    # 检查是否已有相同导出
+    # half 字段是 3 态精度码：0=FP32 / 1=FP16 / 2=INT8
+    precision_code = 2 if req.int8 else (1 if req.half else 0)
+
+    # 检查是否已有相同导出（含精度，否则 INT8 会被同 task 的 FP16 误判为已存在）
     existing = db.query(ExportedModel).filter(
         ExportedModel.task_id == req.task_id,
         ExportedModel.source_type == req.source_type,
         ExportedModel.export_format == req.export_format,
         ExportedModel.imgsz == req.imgsz,
+        ExportedModel.half == precision_code,
         ExportedModel.status == "completed",
     ).first()
     if existing:
-        raise HTTPException(status_code=409, detail="该格式已导出，无需重复导出")
+        raise HTTPException(status_code=409, detail="该格式与精度组合已导出，无需重复导出")
 
     # 创建记录（half: 0=FP32, 1=FP16, 2=INT8）
     record = ExportedModel(
@@ -153,7 +157,7 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
         source_type=req.source_type,
         export_format=req.export_format,
         imgsz=req.imgsz,
-        half=2 if req.int8 else (1 if req.half else 0),
+        half=precision_code,
         status="exporting",
     )
     db.add(record)
