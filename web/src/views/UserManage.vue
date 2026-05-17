@@ -95,9 +95,14 @@ async function toggleRole(row: UserInfo) {
 }
 
 async function resetPwd(userId: number) {
-  try { await ElMessageBox.confirm('密码将重置为 123456', '重置密码', { type:'warning' }) } catch { return }
-  await api.put(`/auth/users/${userId}/reset-password`)
-  ElMessage.success('密码已重置为 123456')
+  try { await ElMessageBox.confirm('将为该用户生成一次性随机密码，请立即转告本人并提醒首次登录后修改。', '重置密码', { type:'warning' }) } catch { return }
+  const resp = await api.put<{ password: string }>(`/auth/users/${userId}/reset-password`)
+  const newPwd = resp.data?.password || ''
+  if (newPwd) {
+    await ElMessageBox.alert(`新密码：${newPwd}\n\n（此密码仅显示一次，请截图或复制后转告用户）`, '重置成功', { confirmButtonText: '我已记录' })
+  } else {
+    ElMessage.success('密码已重置')
+  }
 }
 
 async function deleteUser(userId: number) {
