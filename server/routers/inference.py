@@ -495,7 +495,22 @@ async def run_inference(
 ):
     """单张推断 + 持久化（multipart 上传图片）"""
     mp = _resolve_model_path(model_path, task_id, db)
-    content = await file.read()
+
+    # 与 images.upload 一致：先用 file.size 快速拒绝，再流式读以防 OOM
+    max_size = settings.MAX_UPLOAD_SIZE
+    if file.size is not None and file.size > max_size:
+        raise HTTPException(status_code=413, detail=f"图像超过上限 {max_size} 字节")
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(status_code=413, detail=f"图像超过上限 {max_size} 字节")
+        chunks.append(chunk)
+    content = b"".join(chunks)
     img_array = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_UNCHANGED)
     if img_array is None:
         raise HTTPException(status_code=400, detail="无法读取图像")
