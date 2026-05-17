@@ -314,7 +314,17 @@ const chartLr = ref<HTMLElement>()
 
 let charts: echarts.ECharts[] = []
 
+// 抽出来以便在 onBeforeUnmount 里 removeEventListener
+function onWindowResize() {
+  charts.forEach(c => c.resize())
+}
+
 onMounted(async () => {
+  // 监听 resize 必须在 mount 时注册，并且在 unmount 时移除——
+  // 否则每访问一次本页面就会泄漏一个监听器，
+  // 引用已被 dispose 的旧 charts 数组，下次窗口缩放时报错
+  window.addEventListener('resize', onWindowResize)
+
   await loadTasks()
   // 自动选中最新任务
   if (tasks.value.length > 0) {
@@ -331,8 +341,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', onWindowResize)
   if (pollTimer) clearInterval(pollTimer)
   charts.forEach(c => c.dispose())
+  charts = []
 })
 
 async function loadTasks() {
@@ -482,8 +494,7 @@ function duration(start: string, end: string) {
   return `${Math.floor(sec/3600)}时${Math.floor((sec%3600)/60)}分`
 }
 
-// 窗口 resize 时重新调整图表大小
-window.addEventListener('resize', () => { charts.forEach(c => c.resize()) })
+// 窗口 resize 监听器在 onMounted / onBeforeUnmount 配对管理（见上方）
 </script>
 
 <style scoped>
