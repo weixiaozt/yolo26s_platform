@@ -230,12 +230,30 @@ def _do_export(export_id: int, src_path: str, fmt: str, imgsz: int, half: bool, 
 
 @router.delete("/{export_id}")
 def delete_export(export_id: int, db: Session = Depends(get_db)):
-    """删除导出记录"""
+    """删除导出记录 + 落盘的导出文件/目录。"""
     record = db.query(ExportedModel).filter(ExportedModel.id == export_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+
+    # 抓盘上路径再删 DB
+    ep_str = record.export_path
     db.delete(record)
     db.commit()
+
+    # 限制只删除 STORAGE_ROOT 内的路径，防止 DB 被改后误删任意文件
+    if ep_str:
+        try:
+            ep = Path(ep_str).resolve()
+            storage_root = Path(settings.STORAGE_ROOT).resolve()
+            if ep.exists() and ep.is_relative_to(storage_root):
+                if ep.is_file():
+                    ep.unlink(missing_ok=True)
+                elif ep.is_dir():
+                    import shutil
+                    shutil.rmtree(str(ep), ignore_errors=True)
+        except Exception:
+            # 删 DB 已成功，盘上残留不致命
+            pass
     return {"ok": True}
 
 
