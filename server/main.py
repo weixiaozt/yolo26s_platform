@@ -84,13 +84,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path
         # 不需要认证的路径
+        # 注：推断结果图片通过 /static/storage/ 提供，不需要单独的 /api/inference/image/ 白名单
         skip_auth = (
             path in AUTH_WHITELIST
             or path.startswith("/static/")
             or path.startswith("/api/auth/login")
-            or path.startswith("/api/images/") and "/file" in path   # 图片缩略图/原图
-            or path.startswith("/api/inference/image/")               # 推断结果图片
-            or path.startswith("/api/export/download/")               # 模型下载
+            or (path.startswith("/api/images/") and "/file" in path)   # 图片缩略图/原图
+            or path.startswith("/api/export/download/")                # 模型下载
         )
         if skip_auth:
             return await call_next(request)
