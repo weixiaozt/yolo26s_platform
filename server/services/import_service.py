@@ -165,8 +165,8 @@ def auto_detect_pixel_class_mapping(
             root = tree.getroot()
             xml_w = int(root.findtext(".//size/width", "0"))
             xml_h = int(root.findtext(".//size/height", "0"))
-        except:
-            xml_w, xml_h = 0, 0
+        except (ET.ParseError, ValueError, OSError):
+            continue
 
         for obj in root.findall("object"):
             name_elem = obj.find("name")
