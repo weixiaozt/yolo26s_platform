@@ -343,17 +343,29 @@ def get_class_stats(project_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/images/{image_id}", status_code=204)
 def delete_image(image_id: int, db: Session = Depends(get_db)):
-    """删除图像及其标注"""
+    """删除图像及其标注 + 磁盘文件。
+
+    file_path / thumb_path 来自 DB。写操作（unlink）比读取更敏感——一旦 DB 行
+    被改成 '../../../something'，没有边界校验就会删掉 STORAGE_ROOT 之外的文件。
+    """
     image = db.query(Image).filter(Image.id == image_id).first()
     if not image:
         raise HTTPException(status_code=404, detail="图像不存在")
 
-    # 删除物理文件
-    file_path = settings.upload_path / image.file_path
-    file_path.unlink(missing_ok=True)
-    if image.thumb_path:
-        thumb_path = settings.upload_path / image.thumb_path
-        thumb_path.unlink(missing_ok=True)
+    upload_root = settings.upload_path.resolve()
+
+    def _safe_unlink(rel: str | None) -> None:
+        if not rel:
+            return
+        try:
+            target = (settings.upload_path / rel).resolve()
+            target.relative_to(upload_root)
+        except (ValueError, OSError):
+            return
+        target.unlink(missing_ok=True)
+
+    _safe_unlink(image.file_path)
+    _safe_unlink(image.thumb_path)
 
     db.delete(image)
     db.commit()
