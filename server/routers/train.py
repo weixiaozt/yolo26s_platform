@@ -3,13 +3,20 @@
 训练管理 API
 """
 
+import logging
+import shutil
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..models.project import Project
 from ..models.train_task import TrainTask, TrainEpochLog
 from ..schemas.train_task import TrainTaskCreate, TrainTaskOut, EpochLogOut
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["训练管理"])
 
@@ -115,7 +122,7 @@ def cancel_train_task(task_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/train/tasks/{task_id}", status_code=204)
 def delete_train_task(task_id: int, db: Session = Depends(get_db)):
-    """删除训练任务"""
+    """删除训练任务（DB + 该任务的 runs/task_<id>/ 整个目录）。"""
     task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -133,8 +140,22 @@ def delete_train_task(task_id: int, db: Session = Depends(get_db)):
         except Exception:
             pass
 
+    # 抓出磁盘路径再删 DB（output_dir 可能为空，回退到 runs/task_<id>）
+    run_dir: Path | None = None
+    if task.output_dir:
+        run_dir = Path(task.output_dir)
+    else:
+        run_dir = Path(settings.STORAGE_ROOT).resolve() / settings.RUNS_DIR / f"task_{task_id}"
+
     db.delete(task)
     db.commit()
+
+    runs_root = (Path(settings.STORAGE_ROOT).resolve() / settings.RUNS_DIR).resolve()
+    try:
+        if run_dir and run_dir.exists() and run_dir.resolve().is_relative_to(runs_root):
+            shutil.rmtree(str(run_dir), ignore_errors=True)
+    except Exception:
+        log.exception("delete_train_task: failed to rm run_dir %s", run_dir)
 
 
 @router.get("/projects/{project_id}/train/completed-tasks")

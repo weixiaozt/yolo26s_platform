@@ -17,11 +17,13 @@ log = logging.getLogger(__name__)
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
+from ..config import settings
 from ..database import get_db
 from ..models.project import Project
 from ..models.defect_class import DefectClass
 from ..models.image import Image
 from ..models.annotation import Annotation
+from ..models.train_task import TrainTask
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats, DefectClassCreate, DefectClassOut,
 )
@@ -152,12 +154,36 @@ def save_train_config_cache(
 
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: int, db: Session = Depends(get_db)):
-    """删除项目（级联删除所有关联数据）"""
+    """删除项目（级联删除 DB 数据 + 磁盘文件）。"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    # 先抓出磁盘上要清的路径（DB 删完后就查不到 task_id 了）
+    upload_dir = settings.upload_path / str(project_id)
+    train_dirs: list[Path] = []
+    for t in db.query(TrainTask).filter(TrainTask.project_id == project_id).all():
+        run_root = Path(settings.STORAGE_ROOT).resolve() / settings.RUNS_DIR / f"task_{t.id}"
+        if run_root.exists():
+            train_dirs.append(run_root)
+
     db.delete(project)
     db.commit()
+
+    # 磁盘清理失败不回滚 DB —— DB 已经一致，文件残留下次再清比 DB 半残更可控
+    upload_root = settings.upload_path.resolve()
+    runs_root = (Path(settings.STORAGE_ROOT).resolve() / settings.RUNS_DIR).resolve()
+    try:
+        if upload_dir.exists() and upload_dir.resolve().is_relative_to(upload_root):
+            shutil.rmtree(str(upload_dir), ignore_errors=True)
+    except Exception:
+        log.exception("delete_project: failed to rm upload_dir %s", upload_dir)
+    for d in train_dirs:
+        try:
+            if d.resolve().is_relative_to(runs_root):
+                shutil.rmtree(str(d), ignore_errors=True)
+        except Exception:
+            log.exception("delete_project: failed to rm train_dir %s", d)
 
 
 @router.get("/{project_id}/export-package")
