@@ -207,15 +207,26 @@ def get_image_file(
     thumb: bool = Query(default=False, description="是否返回缩略图"),
     db: Session = Depends(get_db),
 ):
-    """获取图像文件（原图或缩略图）"""
+    """获取图像文件（原图或缩略图）。
+
+    file_path 来自 DB（正常流程下由我们自己写入），但加 resolve + is_relative_to
+    防御万一 DB 被改后通过本端点读取 STORAGE_ROOT 之外的任意文件。本接口默认
+    不走 AuthMiddleware（见 main.py 白名单），所以匿名可访问，更需要这层校验。
+    """
     image = db.query(Image).filter(Image.id == image_id).first()
     if not image:
         raise HTTPException(status_code=404, detail="图像不存在")
 
+    upload_root = settings.upload_path.resolve()
     if thumb and image.thumb_path:
-        file_path = settings.upload_path / image.thumb_path
+        file_path = (settings.upload_path / image.thumb_path).resolve()
     else:
-        file_path = settings.upload_path / image.file_path
+        file_path = (settings.upload_path / image.file_path).resolve()
+
+    try:
+        file_path.relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="非法路径")
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
