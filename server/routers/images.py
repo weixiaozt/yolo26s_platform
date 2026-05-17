@@ -58,10 +58,19 @@ async def upload_images(
     project_dir.mkdir(parents=True, exist_ok=True)
     thumb_dir.mkdir(parents=True, exist_ok=True)
 
+    max_size = settings.MAX_UPLOAD_SIZE
+
     for file in files:
         # 检查格式
+        if not file.filename:
+            continue
         ext = Path(file.filename).suffix.lower()
         if ext not in ALLOWED_EXTS:
+            continue
+
+        # 上传前如果框架已提供 size，先快速拒绝过大文件，避免无谓读盘
+        if file.size is not None and file.size > max_size:
+            print(f"[upload] skipped {file.filename}: size {file.size} > MAX_UPLOAD_SIZE {max_size}")
             continue
 
         # 生成唯一文件名，避免重名冲突
@@ -69,8 +78,23 @@ async def upload_images(
         save_path = project_dir / unique_name
         thumb_path = thumb_dir / f"{unique_name}.jpg"
 
-        # 保存文件
-        content = await file.read()
+        # 保存文件（流式读取以便提前发现超限，防止 OOM）
+        content_chunks: list[bytes] = []
+        total = 0
+        oversized = False
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_size:
+                oversized = True
+                break
+            content_chunks.append(chunk)
+        if oversized:
+            print(f"[upload] skipped {file.filename}: exceeded MAX_UPLOAD_SIZE {max_size} mid-stream")
+            continue
+        content = b"".join(content_chunks)
         save_path.write_bytes(content)
 
         # 读取图像尺寸
