@@ -618,35 +618,31 @@ def list_history(project_id: int = Query(default=0), page: int = Query(default=1
     total = q.count()
     items = q.order_by(InferenceResult.created_at.desc()).offset((page-1)*page_size).limit(page_size).all()
 
-    # 加载类别名称映射（按 project_id 分组缓存）
-    cn_cache: dict = {}
-    def get_class_names(pid: int) -> dict:
-        if pid not in cn_cache:
-            dcs = db.query(DefectClass).filter(DefectClass.project_id == pid).all()
-            cn_cache[pid] = {dc.class_index: dc.name for dc in dcs}
-        return cn_cache[pid]
+    # 一次性把页面里涉及的 project_id / task_id 全捞出来，避免在循环里 N+1
+    project_ids = {r.project_id for r in items if r.project_id}
+    task_ids = {r.task_id for r in items if r.task_id}
+
+    cn_cache: dict[int, dict] = {pid: {} for pid in project_ids}
+    if project_ids:
+        for dc in db.query(DefectClass).filter(DefectClass.project_id.in_(project_ids)).all():
+            cn_cache.setdefault(dc.project_id, {})[dc.class_index] = dc.name
+
+    tt_cache: dict[int, str] = {}
+    if task_ids:
+        for t in db.query(TrainTask).filter(TrainTask.id.in_(task_ids)).all():
+            tt_cache[t.id] = (t.config or {}).get("task_type", "seg") if t.config else "seg"
 
     def enrich(dets, pid):
         if not dets: return []
-        names = get_class_names(pid) if pid else {}
+        names = cn_cache.get(pid, {}) if pid else {}
         for d in dets:
             if "class_name" not in d or not d.get("class_name"):
                 cid = d.get("class_id", 0)
                 d["class_name"] = names.get(cid, f"C{cid}")
         return dets
 
-    # task_type 缓存（按 task_id 查 TrainTask.config）
-    tt_cache: dict = {}
     def get_task_type(tid: int) -> str:
-        if tid in tt_cache:
-            return tt_cache[tid]
-        tt = "seg"
-        if tid:
-            t = db.query(TrainTask).filter(TrainTask.id == tid).first()
-            if t and t.config:
-                tt = t.config.get("task_type", "seg")
-        tt_cache[tid] = tt
-        return tt
+        return tt_cache.get(tid, "seg")
 
     def infer_task_type(r) -> str:
         """优先从 TrainTask.config 取；取不到时根据 detections 字段兜底判断"""
