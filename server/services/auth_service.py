@@ -16,8 +16,15 @@ from sqlalchemy.orm import Session
 from ..models.user import User
 
 # ---- 配置 ----
-SECRET_KEY = os.environ.get("JWT_SECRET", "yolo26s_seg_platform_secret_key_2024")
+# 注意：默认密钥仅供本地开发，生产环境必须通过 JWT_SECRET 环境变量覆盖。
+DEFAULT_SECRET_KEY = "yolo26s_seg_platform_secret_key_2024"
+SECRET_KEY = os.environ.get("JWT_SECRET", DEFAULT_SECRET_KEY)
 TOKEN_EXPIRE_HOURS = 24
+
+
+def is_using_default_secret() -> bool:
+    """启动时检测是否在用编译进代码的默认密钥（不安全）。"""
+    return SECRET_KEY == DEFAULT_SECRET_KEY
 
 
 # ---- 密码哈希（不依赖 bcrypt，用 PBKDF2）----

@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     init_db()
     # 创建默认管理员
     from .database import SessionLocal
-    from .services.auth_service import create_default_admin
+    from .services.auth_service import create_default_admin, is_using_default_secret
     db = SessionLocal()
     try:
         create_default_admin(db)
@@ -48,6 +48,9 @@ async def lifespan(app: FastAPI):
     print("  YOLO26s-Seg 标注训练平台 后端已启动")
     print(f"  API 文档: http://localhost:{settings.PORT}/docs")
     print(f"  默认管理员: admin / admin123")
+    if is_using_default_secret():
+        print("  [!! 安全告警 !!] JWT_SECRET 未配置，正在使用编译进代码的默认密钥；")
+        print("                    生产环境务必在 .env 中设置 JWT_SECRET=<随机长串>")
     print("=" * 60)
     yield
 
