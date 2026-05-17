@@ -413,21 +413,31 @@ async function loadImageAndAnnotations(){
   currentImage.value=imageList.value.find(i=>i.id===currentImageId.value)||null
   removeVertexHandles()
   canvas.clear();canvas.backgroundColor='#2a2a2a'
-  const url=imageApi.getFileUrl(currentImageId.value,false)
+  // 锁定本次请求对应的 imageId；如果用户在 await 期间切了图，丢弃这次返回，
+  // 否则旧请求的标注会把新图覆盖（实际表现：切到新图却显示前一张的标注）
+  const reqImageId=currentImageId.value
+  const url=imageApi.getFileUrl(reqImageId,false)
   fabric.Image.fromURL(url,(img)=>{
     if(!canvas)return
+    if(reqImageId!==currentImageId.value)return  // 已切图，旧 img 不要放上去
     img.set({selectable:false,evented:false,originX:'left',originY:'top'})
     canvas.add(img);canvas.sendToBack(img);zoomFit()
   },{crossOrigin:'anonymous'})
   try{
-    const{data}=await annotationApi.get(currentImageId.value)
+    const{data}=await annotationApi.get(reqImageId)
+    if(reqImageId!==currentImageId.value)return  // 切图了，本次响应作废
     annotations.value=data.map(a=>({
       class_id:a.class_id,
       // 加载时也 clamp，避免历史 VOC 导入的越界数据被原样回写造成 422
       polygon:sanitizePolygon((a.polygon as any[]).map(p => Array.isArray(p) ? {x:p[0],y:p[1]} : {x:p.x,y:p.y}))
     })).filter(a=>a.polygon.length>=3)
-    await nextTick();renderAnnotations()
-  }catch{annotations.value=[]}
+    await nextTick()
+    if(reqImageId!==currentImageId.value)return  // nextTick 后还得再确认一次
+    renderAnnotations()
+  }catch{
+    if(reqImageId===currentImageId.value) annotations.value=[]
+  }
+  if(reqImageId!==currentImageId.value)return
   dirty.value=false;undoStack.value=[];redoStack.value=[];selectedAnnIdx.value=-1
 }
 
