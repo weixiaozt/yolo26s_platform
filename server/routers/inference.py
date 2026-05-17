@@ -111,8 +111,14 @@ def list_models(project_id: int = Query(default=0), db: Session = Depends(get_db
         eq = eq.filter(False)  # 项目下没有训练任务，不显示导出模型
     exports = eq.order_by(ExportedModel.created_at.desc()).all()
     fmt_map = {"onnx": "ONNX", "openvino": "OpenVINO", "tensorrt": "TensorRT"}
+    # 一次性把所有 export 关联的 task 取出，避免 N+1
+    task_by_id = {t.id: t for t in tasks}
+    missing_ids = {e.task_id for e in exports if e.task_id not in task_by_id}
+    if missing_ids:
+        for t in db.query(TrainTask).filter(TrainTask.id.in_(missing_ids)).all():
+            task_by_id[t.id] = t
     for e in exports:
-        t = db.query(TrainTask).filter(TrainTask.id == e.task_id).first()
+        t = task_by_id.get(e.task_id)
         tname = t.task_name if t else f"Task#{e.task_id}"
         fp = "FP16" if e.half else "FP32"
         models.append({"task_id": e.task_id, "model_format": e.export_format,
