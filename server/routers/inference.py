@@ -658,8 +658,22 @@ def list_history(project_id: int = Query(default=0), page: int = Query(default=1
         for r in items]}
 
 
-def _url_to_disk(url: str) -> Path:
-    return Path(settings.STORAGE_ROOT).resolve() / url.replace("/static/storage/", "")
+def _url_to_disk(url: str) -> Path | None:
+    """
+    把 /static/storage/... URL 反解成磁盘路径，并强制约束在 STORAGE_ROOT 内。
+    URL 通常来自 DB 中我们自己写入的值，但加一层 resolve + is_relative_to
+    防止 DB 被篡改时通过路径穿越触发任意文件删除。
+    """
+    root = Path(settings.STORAGE_ROOT).resolve()
+    rel = url.replace("/static/storage/", "", 1).lstrip("/\\")
+    if not rel:
+        return None
+    target = (root / rel).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    return target
 
 
 @router.delete("/history/{rid}")
@@ -669,7 +683,7 @@ def del_history(rid: int, db: Session = Depends(get_db)):
     for p in [r.original_path, r.overlay_path, r.mask_path]:
         if p:
             fp = _url_to_disk(p)
-            if fp.exists(): fp.unlink()
+            if fp and fp.exists(): fp.unlink()
     db.delete(r); db.commit()
     return {"ok": True}
 
@@ -683,7 +697,7 @@ def clear_history(project_id: int = Query(default=0), db: Session = Depends(get_
         for p in [r.original_path, r.overlay_path, r.mask_path]:
             if p:
                 fp = _url_to_disk(p)
-                if fp.exists(): fp.unlink()
+                if fp and fp.exists(): fp.unlink()
         db.delete(r)
     db.commit()
     return {"ok": True, "deleted": len(recs)}
