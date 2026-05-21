@@ -111,8 +111,14 @@ def list_models(project_id: int = Query(default=0), db: Session = Depends(get_db
         eq = eq.filter(False)  # 项目下没有训练任务，不显示导出模型
     exports = eq.order_by(ExportedModel.created_at.desc()).all()
     fmt_map = {"onnx": "ONNX", "openvino": "OpenVINO", "tensorrt": "TensorRT"}
+    # 一次性把所有 export 关联的 task 取出，避免 N+1
+    task_by_id = {t.id: t for t in tasks}
+    missing_ids = {e.task_id for e in exports if e.task_id not in task_by_id}
+    if missing_ids:
+        for t in db.query(TrainTask).filter(TrainTask.id.in_(missing_ids)).all():
+            task_by_id[t.id] = t
     for e in exports:
-        t = db.query(TrainTask).filter(TrainTask.id == e.task_id).first()
+        t = task_by_id.get(e.task_id)
         tname = t.task_name if t else f"Task#{e.task_id}"
         fp = "FP16" if e.half else "FP32"
         models.append({"task_id": e.task_id, "model_format": e.export_format,
@@ -489,7 +495,22 @@ async def run_inference(
 ):
     """单张推断 + 持久化（multipart 上传图片）"""
     mp = _resolve_model_path(model_path, task_id, db)
-    content = await file.read()
+
+    # 与 images.upload 一致：先用 file.size 快速拒绝，再流式读以防 OOM
+    max_size = settings.MAX_UPLOAD_SIZE
+    if file.size is not None and file.size > max_size:
+        raise HTTPException(status_code=413, detail=f"图像超过上限 {max_size} 字节")
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(status_code=413, detail=f"图像超过上限 {max_size} 字节")
+        chunks.append(chunk)
+    content = b"".join(chunks)
     img_array = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_UNCHANGED)
     if img_array is None:
         raise HTTPException(status_code=400, detail="无法读取图像")
@@ -526,9 +547,18 @@ def run_inference_by_image_id(
     if not project_id:
         project_id = image.project_id
 
+    # 与 get_image_file 一致：DB-stored file_path 走 upload_path 拼接 + 边界校验，
+    # 防 DB 被改后通过该端点读取 STORAGE_ROOT 之外的任意文件
+    upload_root = settings.upload_path.resolve()
     fp = Path(image.file_path)
-    if not fp.is_absolute():
-        fp = settings.upload_path / image.file_path
+    if fp.is_absolute():
+        fp = fp.resolve()
+    else:
+        fp = (settings.upload_path / image.file_path).resolve()
+    try:
+        fp.relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(400, "非法路径")
     if not fp.exists():
         raise HTTPException(404, f"图像文件不存在: {fp}")
 
@@ -597,35 +627,31 @@ def list_history(project_id: int = Query(default=0), page: int = Query(default=1
     total = q.count()
     items = q.order_by(InferenceResult.created_at.desc()).offset((page-1)*page_size).limit(page_size).all()
 
-    # 加载类别名称映射（按 project_id 分组缓存）
-    cn_cache: dict = {}
-    def get_class_names(pid: int) -> dict:
-        if pid not in cn_cache:
-            dcs = db.query(DefectClass).filter(DefectClass.project_id == pid).all()
-            cn_cache[pid] = {dc.class_index: dc.name for dc in dcs}
-        return cn_cache[pid]
+    # 一次性把页面里涉及的 project_id / task_id 全捞出来，避免在循环里 N+1
+    project_ids = {r.project_id for r in items if r.project_id}
+    task_ids = {r.task_id for r in items if r.task_id}
+
+    cn_cache: dict[int, dict] = {pid: {} for pid in project_ids}
+    if project_ids:
+        for dc in db.query(DefectClass).filter(DefectClass.project_id.in_(project_ids)).all():
+            cn_cache.setdefault(dc.project_id, {})[dc.class_index] = dc.name
+
+    tt_cache: dict[int, str] = {}
+    if task_ids:
+        for t in db.query(TrainTask).filter(TrainTask.id.in_(task_ids)).all():
+            tt_cache[t.id] = (t.config or {}).get("task_type", "seg") if t.config else "seg"
 
     def enrich(dets, pid):
         if not dets: return []
-        names = get_class_names(pid) if pid else {}
+        names = cn_cache.get(pid, {}) if pid else {}
         for d in dets:
             if "class_name" not in d or not d.get("class_name"):
                 cid = d.get("class_id", 0)
                 d["class_name"] = names.get(cid, f"C{cid}")
         return dets
 
-    # task_type 缓存（按 task_id 查 TrainTask.config）
-    tt_cache: dict = {}
     def get_task_type(tid: int) -> str:
-        if tid in tt_cache:
-            return tt_cache[tid]
-        tt = "seg"
-        if tid:
-            t = db.query(TrainTask).filter(TrainTask.id == tid).first()
-            if t and t.config:
-                tt = t.config.get("task_type", "seg")
-        tt_cache[tid] = tt
-        return tt
+        return tt_cache.get(tid, "seg")
 
     def infer_task_type(r) -> str:
         """优先从 TrainTask.config 取；取不到时根据 detections 字段兜底判断"""
@@ -652,8 +678,22 @@ def list_history(project_id: int = Query(default=0), page: int = Query(default=1
         for r in items]}
 
 
-def _url_to_disk(url: str) -> Path:
-    return Path(settings.STORAGE_ROOT).resolve() / url.replace("/static/storage/", "")
+def _url_to_disk(url: str) -> Path | None:
+    """
+    把 /static/storage/... URL 反解成磁盘路径，并强制约束在 STORAGE_ROOT 内。
+    URL 通常来自 DB 中我们自己写入的值，但加一层 resolve + is_relative_to
+    防止 DB 被篡改时通过路径穿越触发任意文件删除。
+    """
+    root = Path(settings.STORAGE_ROOT).resolve()
+    rel = url.replace("/static/storage/", "", 1).lstrip("/\\")
+    if not rel:
+        return None
+    target = (root / rel).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    return target
 
 
 @router.delete("/history/{rid}")
@@ -663,7 +703,7 @@ def del_history(rid: int, db: Session = Depends(get_db)):
     for p in [r.original_path, r.overlay_path, r.mask_path]:
         if p:
             fp = _url_to_disk(p)
-            if fp.exists(): fp.unlink()
+            if fp and fp.exists(): fp.unlink()
     db.delete(r); db.commit()
     return {"ok": True}
 
@@ -677,7 +717,7 @@ def clear_history(project_id: int = Query(default=0), db: Session = Depends(get_
         for p in [r.original_path, r.overlay_path, r.mask_path]:
             if p:
                 fp = _url_to_disk(p)
-                if fp.exists(): fp.unlink()
+                if fp and fp.exists(): fp.unlink()
         db.delete(r)
     db.commit()
     return {"ok": True, "deleted": len(recs)}

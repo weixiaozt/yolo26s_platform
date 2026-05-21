@@ -75,6 +75,17 @@ const router = createRouter({
   ],
 })
 
+function readStoredUser(): { role?: string } {
+  // localStorage 可能被旧版本/手动篡改写入非 JSON，必须容错，
+  // 否则 admin 路由守卫会抛异常导致整个导航卡死
+  try {
+    return JSON.parse(localStorage.getItem('user') || '{}')
+  } catch {
+    localStorage.removeItem('user')
+    return {}
+  }
+}
+
 // 路由守卫：未登录跳转登录页
 router.beforeEach((to, from, next) => {
   const token = localStorage.getItem('token')
@@ -85,7 +96,7 @@ router.beforeEach((to, from, next) => {
   } else if (!token) {
     next('/login')
   } else if (to.meta.adminOnly) {
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
+    const user = readStoredUser()
     if (user.role === 'admin') next()
     else next('/')
   } else {

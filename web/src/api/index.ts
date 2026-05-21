@@ -24,6 +24,11 @@ api.interceptors.response.use(
       localStorage.removeItem('user')
       if (window.location.pathname !== '/login') {
         window.location.href = '/login'
+      } else {
+        // 已经在登录页（典型场景：用户名/密码错误），不重定向，
+        // 但要把后端的 detail 弹出来，不能静默吞掉错误
+        const msg = err.response?.data?.detail || '登录失败'
+        ElMessage.error(msg)
       }
       return Promise.reject(err)
     }

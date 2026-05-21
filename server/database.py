@@ -92,11 +92,19 @@ def init_db():
             "projects.last_train_config",
         ),
     ]
+    # MySQL 在字段/索引/约束已存在时分别报这些错；其它异常视为真正失败要打印出来。
+    _ALREADY_EXISTS_TOKENS = ("Duplicate column", "Duplicate key", "Duplicate", "already exists", "errno: 121", "1060", "1061", "1826")
     for sql, label in migrations:
         with engine.connect() as conn:
             try:
                 conn.execute(text(sql))
                 conn.commit()
-                print(f"[迁移] 已添加 {label} 字段")
-            except Exception:
-                conn.rollback()  # 字段已存在，忽略
+                print(f"[迁移] 已添加 {label}")
+            except Exception as e:
+                conn.rollback()
+                msg = str(e)
+                if any(tok in msg for tok in _ALREADY_EXISTS_TOKENS):
+                    # 已存在的字段/索引/外键 — 静默跳过
+                    continue
+                # 其它失败要在启动日志里能看到，避免悄悄上线半残的库结构
+                print(f"[迁移!!] {label} 失败: {msg.splitlines()[0]}")

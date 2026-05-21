@@ -30,6 +30,9 @@ from ..models.defect_class import DefectClass
 from ..models.image import Image
 from ..models.annotation import Annotation
 
+# 单个 ZIP 内文件解压后大小上限（防 zip bomb），200MB 远超任何真实工业图
+_MAX_ENTRY_SIZE = 200 * 1024 * 1024
+
 
 def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
     """将项目导出为 ZIP 文件，仅导出已标注的图片及其标注。"""
@@ -183,15 +186,32 @@ def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
 
         zip_name_to_image_id: dict = {}
         imported_images = 0
+        upload_dir_resolved = upload_dir.resolve()
         for img_info in images_data:
             zip_name = img_info["zip_filename"]
-            zip_path_in_archive = f"images/{zip_name}"
+            # 防 ZIP slip：images.json 中的 zip_filename 来自 ZIP 内容（不可信）；
+            # 用 Path.name 强制只取最后一个组件，剥掉任何 ../ 或目录分隔符
+            safe_name = Path(zip_name).name
+            if not safe_name or safe_name in (".", ".."):
+                continue
+            zip_path_in_archive = f"images/{safe_name}"
             if zip_path_in_archive not in names:
                 continue
 
+            # 防 zip bomb：声明的解压后大小超过阈值就跳过
+            try:
+                info = zf.getinfo(zip_path_in_archive)
+                if info.file_size > _MAX_ENTRY_SIZE:
+                    continue
+            except KeyError:
+                continue
+
             # 新文件名带新 uuid，避免和其他项目冲突
-            new_name = f"{uuid.uuid4().hex[:8]}_{zip_name}"
+            new_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
             target_path = upload_dir / new_name
+            # 再校验一遍解析后的路径必须在 upload_dir 内（双保险）
+            if not target_path.resolve().is_relative_to(upload_dir_resolved):
+                continue
             with zf.open(zip_path_in_archive) as src, open(target_path, "wb") as dst:
                 shutil.copyfileobj(src, dst)
 

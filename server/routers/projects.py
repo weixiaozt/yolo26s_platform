@@ -3,20 +3,27 @@
 项目管理 API
 """
 
+import logging
+import os
+import shutil
 import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
+
+log = logging.getLogger(__name__)
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
+from ..config import settings
 from ..database import get_db
 from ..models.project import Project
 from ..models.defect_class import DefectClass
 from ..models.image import Image
 from ..models.annotation import Annotation
+from ..models.train_task import TrainTask
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats, DefectClassCreate, DefectClassOut,
 )
@@ -147,16 +154,87 @@ def save_train_config_cache(
 
 @router.delete("/{project_id}", status_code=204)
 def delete_project(project_id: int, db: Session = Depends(get_db)):
-    """删除项目（级联删除所有关联数据）"""
+    """删除项目（级联删除 DB 数据 + 磁盘文件）。
+
+    注意：InferenceResult / ExportedModel 在 ORM 上没有声明外键到 Project（历史
+    遗留），ORM cascade 抓不到它们；这里手动清理。
+    """
+    from ..models.inference_result import InferenceResult
+    from ..models.exported_model import ExportedModel
+
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    # 先抓出磁盘上要清的路径（DB 删完后就查不到 task_id 了）
+    upload_dir = settings.upload_path / str(project_id)
+    train_dirs: list[Path] = []
+    export_paths: list[str] = []
+    inference_paths: list[str] = []
+    task_ids: list[int] = []
+    for t in db.query(TrainTask).filter(TrainTask.project_id == project_id).all():
+        task_ids.append(t.id)
+        run_root = Path(settings.STORAGE_ROOT).resolve() / settings.RUNS_DIR / f"task_{t.id}"
+        if run_root.exists():
+            train_dirs.append(run_root)
+    if task_ids:
+        for e in db.query(ExportedModel).filter(ExportedModel.task_id.in_(task_ids)).all():
+            if e.export_path:
+                export_paths.append(e.export_path)
+    for r in db.query(InferenceResult).filter(InferenceResult.project_id == project_id).all():
+        for p in (r.original_path, r.overlay_path, r.overlay_morph_path, r.mask_path):
+            if p:
+                inference_paths.append(p)
+
+    # 手动清掉孤儿表（外键未建，cascade 抓不到）
+    if task_ids:
+        db.query(ExportedModel).filter(ExportedModel.task_id.in_(task_ids)).delete(synchronize_session=False)
+    db.query(InferenceResult).filter(InferenceResult.project_id == project_id).delete(synchronize_session=False)
+
     db.delete(project)
     db.commit()
 
+    # 磁盘清理失败不回滚 DB —— DB 已经一致，文件残留下次再清比 DB 半残更可控
+    upload_root = settings.upload_path.resolve()
+    storage_root = Path(settings.STORAGE_ROOT).resolve()
+    runs_root = (storage_root / settings.RUNS_DIR).resolve()
+    try:
+        if upload_dir.exists() and upload_dir.resolve().is_relative_to(upload_root):
+            shutil.rmtree(str(upload_dir), ignore_errors=True)
+    except Exception:
+        log.exception("delete_project: failed to rm upload_dir %s", upload_dir)
+    for d in train_dirs:
+        try:
+            if d.resolve().is_relative_to(runs_root):
+                shutil.rmtree(str(d), ignore_errors=True)
+        except Exception:
+            log.exception("delete_project: failed to rm train_dir %s", d)
+    # 导出的模型文件（可能在 storage 外，比如直接复制到了别处）
+    for ep_str in export_paths:
+        try:
+            ep = Path(ep_str).resolve()
+            if ep.exists() and ep.is_relative_to(storage_root):
+                if ep.is_file():
+                    ep.unlink(missing_ok=True)
+                elif ep.is_dir():
+                    shutil.rmtree(str(ep), ignore_errors=True)
+        except Exception:
+            log.exception("delete_project: failed to rm export %s", ep_str)
+    # 推断结果图片（在 /static/storage/runs/inference/ 下）
+    for url in inference_paths:
+        try:
+            rel = url.replace("/static/storage/", "", 1).lstrip("/\\")
+            if not rel:
+                continue
+            target = (storage_root / rel).resolve()
+            if target.exists() and target.is_relative_to(storage_root):
+                target.unlink(missing_ok=True)
+        except Exception:
+            log.exception("delete_project: failed to rm inference file %s", url)
+
 
 @router.get("/{project_id}/export-package")
-def export_package(project_id: int, db: Session = Depends(get_db)):
+def export_package(project_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """导出项目为 ZIP（仅已标注图片）"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -169,9 +247,12 @@ def export_package(project_id: int, db: Session = Depends(get_db)):
     try:
         export_project_to_zip(project_id, db, out_path)
     except Exception as e:
-        import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        log.exception("export_project_to_zip failed for project_id=%s", project_id)
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
+
+    # 让 FileResponse 写完后再把临时目录删掉，避免泄漏
+    background_tasks.add_task(shutil.rmtree, str(tmp_dir), ignore_errors=True)
 
     download_name = f"{project.name}_export.zip"
     return FileResponse(
@@ -188,8 +269,12 @@ async def import_package(file: UploadFile = File(...), db: Session = Depends(get
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="请上传 ZIP 文件")
 
-    tmp_path = Path(tempfile.mktemp(suffix=".zip"))
+    # mkstemp 是原子创建（O_EXCL），避免 mktemp 的 race condition
+    fd, tmp_str = tempfile.mkstemp(suffix=".zip", prefix="proj_import_")
+    tmp_path = Path(tmp_str)
     try:
+        # mkstemp 返回的 fd 我们不直接用，下面用 write_bytes 写入路径
+        os.close(fd)
         content = await file.read()
         tmp_path.write_bytes(content)
 
@@ -199,8 +284,8 @@ async def import_package(file: UploadFile = File(...), db: Session = Depends(get
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        import traceback
-        raise HTTPException(status_code=500, detail=f"导入失败: {e}\n{traceback.format_exc()}")
+        log.exception("import_project_from_zip failed for upload=%s", file.filename)
+        raise HTTPException(status_code=500, detail=f"导入失败: {e}")
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -230,8 +315,8 @@ def convert_task_type(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        import traceback
-        raise HTTPException(status_code=500, detail=f"转换失败: {e}\n{traceback.format_exc()}")
+        log.exception("convert_project_task_type failed project_id=%s target=%s", project_id, target_type)
+        raise HTTPException(status_code=500, detail=f"转换失败: {e}")
 
 
 @router.post("/{project_id}/classes", response_model=DefectClassOut, status_code=201)

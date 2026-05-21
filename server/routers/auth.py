@@ -3,6 +3,9 @@
 认证 API：登录、用户管理
 """
 
+import secrets
+import string
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -13,6 +16,15 @@ from ..services.auth_service import (
     authenticate_user, create_token, hash_password,
 )
 from ..deps import get_current_user, require_admin
+
+
+def _generate_temp_password(length: int = 12) -> str:
+    """生成随机临时密码：字母+数字混合，至少包含 1 个数字和 1 个字母。"""
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        pwd = ''.join(secrets.choice(alphabet) for _ in range(length))
+        if any(c.isdigit() for c in pwd) and any(c.isalpha() for c in pwd):
+            return pwd
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
 
@@ -135,13 +147,14 @@ def update_user(user_id: int, req: UserUpdate, admin: User = Depends(require_adm
 
 @router.put("/users/{user_id}/reset-password")
 def reset_user_password(user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    """重置用户密码为 123456（管理员）"""
+    """重置用户密码为随机临时密码（管理员）。返回明文密码一次性展示，管理员需立即转告用户。"""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    user.password_hash = hash_password("123456")
+    temp_pwd = _generate_temp_password()
+    user.password_hash = hash_password(temp_pwd)
     db.commit()
-    return {"ok": True, "message": f"密码已重置为 123456"}
+    return {"ok": True, "password": temp_pwd, "message": f"密码已重置为 {temp_pwd}"}
 
 
 @router.delete("/users/{user_id}")

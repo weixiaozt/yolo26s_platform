@@ -7,7 +7,7 @@ import json
 import shutil
 import uuid
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -24,6 +24,21 @@ router = APIRouter(prefix="/api/import", tags=["标注导入"])
 SUPPORTED_IMG_EXTS = {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}
 
 
+def _safe_basename(filename: Optional[str]) -> Optional[str]:
+    """
+    上传文件名只取 basename 部分，剥掉任何路径组件。
+    防止 'foo/../../../etc/passwd' 这样的输入在拼接 Path 时穿越目录。
+    None / '' / '.' / '..' 一律返回 None，调用方需跳过。
+    """
+    if not filename:
+        return None
+    # 兼容 Windows 反斜杠和 POSIX 正斜杠
+    name = Path(filename.replace("\\", "/")).name
+    if not name or name in (".", ".."):
+        return None
+    return name
+
+
 @router.post("/scan-xml")
 async def scan_xml_classes_api(files: List[UploadFile] = File(...)):
     """
@@ -34,9 +49,10 @@ async def scan_xml_classes_api(files: List[UploadFile] = File(...)):
     tmp_dir = Path(tempfile.mkdtemp())
     try:
         for f in files:
-            if f.filename and f.filename.endswith('.xml'):
+            name = _safe_basename(f.filename)
+            if name and name.lower().endswith('.xml'):
                 content = await f.read()
-                (tmp_dir / f.filename).write_bytes(content)
+                (tmp_dir / name).write_bytes(content)
 
         from ..services.import_service import scan_xml_classes
         class_counts = scan_xml_classes(str(tmp_dir))
@@ -59,13 +75,15 @@ async def auto_mapping_api(
     tmp_mask = Path(tempfile.mkdtemp())
     try:
         for f in xml_files:
-            if f.filename and f.filename.endswith('.xml'):
+            name = _safe_basename(f.filename)
+            if name and name.lower().endswith('.xml'):
                 content = await f.read()
-                (tmp_xml / f.filename).write_bytes(content)
+                (tmp_xml / name).write_bytes(content)
         for f in mask_files:
-            if f.filename:
+            name = _safe_basename(f.filename)
+            if name:
                 content = await f.read()
-                (tmp_mask / f.filename).write_bytes(content)
+                (tmp_mask / name).write_bytes(content)
 
         from ..services.import_service import auto_detect_pixel_class_mapping
         mapping = auto_detect_pixel_class_mapping(str(tmp_xml), str(tmp_mask))
@@ -147,8 +165,9 @@ async def import_project(
     # 建立 mask 文件名索引（stem → UploadFile）
     mask_map = {}
     for mf in masks:
-        if mf.filename:
-            stem = Path(mf.filename).stem
+        safe_mf = _safe_basename(mf.filename)
+        if safe_mf:
+            stem = Path(safe_mf).stem
             mask_map[stem] = mf
 
     from ..services.import_service import mask_to_polygons
@@ -156,18 +175,19 @@ async def import_project(
     stats = {"total": 0, "with_ann": 0, "total_polygons": 0, "skipped": 0}
 
     for img_file in images:
-        if not img_file.filename:
+        safe_img = _safe_basename(img_file.filename)
+        if not safe_img:
             continue
-        ext = Path(img_file.filename).suffix.lower()
+        ext = Path(safe_img).suffix.lower()
         if ext not in SUPPORTED_IMG_EXTS:
             continue
 
         stats["total"] += 1
-        stem = Path(img_file.filename).stem
+        stem = Path(safe_img).stem
 
         # 保存原图
         img_content = await img_file.read()
-        saved_name = f"{uuid.uuid4().hex[:8]}_{img_file.filename}"
+        saved_name = f"{uuid.uuid4().hex[:8]}_{safe_img}"
         img_saved_path = upload_dir / saved_name
         img_saved_path.write_bytes(img_content)
 
@@ -183,7 +203,7 @@ async def import_project(
         rel_path = f"{project.id}/{saved_name}"
         image = Image(
             project_id=project.id,
-            filename=img_file.filename,
+            filename=safe_img,
             file_path=rel_path,
             width=w, height=h,
             status="unlabeled",
@@ -196,12 +216,13 @@ async def import_project(
         if not mask_file:
             continue
 
-        # 保存 Mask 到临时文件
+        # 保存 Mask 到临时文件（mkstemp 避免 mktemp 的 race condition）
         mask_content = await mask_file.read()
-        # reset for potential re-read
         await mask_file.seek(0)
-        import tempfile
-        tmp_mask_path = Path(tempfile.mktemp(suffix='.png'))
+        import tempfile, os as _os
+        _fd, _tmp = tempfile.mkstemp(suffix='.png', prefix='mask_')
+        _os.close(_fd)
+        tmp_mask_path = Path(_tmp)
         tmp_mask_path.write_bytes(mask_content)
 
         try:
@@ -246,9 +267,10 @@ async def scan_voc_classes_api(files: List[UploadFile] = File(...)):
     tmp_dir = Path(tempfile.mkdtemp())
     try:
         for f in files:
-            if f.filename and f.filename.lower().endswith('.xml'):
+            name = _safe_basename(f.filename)
+            if name and name.lower().endswith('.xml'):
                 content = await f.read()
-                (tmp_dir / f.filename).write_bytes(content)
+                (tmp_dir / name).write_bytes(content)
 
         from ..services.import_service import scan_xml_classes
         class_counts = scan_xml_classes(str(tmp_dir))
@@ -338,8 +360,9 @@ async def import_voc_project(
     # 建立 XML 索引（stem → UploadFile）
     xml_map = {}
     for xf in xmls:
-        if xf.filename and xf.filename.lower().endswith('.xml'):
-            stem = Path(xf.filename).stem
+        safe_xf = _safe_basename(xf.filename)
+        if safe_xf and safe_xf.lower().endswith('.xml'):
+            stem = Path(safe_xf).stem
             xml_map[stem] = xf
 
     from ..services.import_service import parse_voc_xml, bbox_to_polygon4
@@ -350,18 +373,19 @@ async def import_voc_project(
     import tempfile
 
     for img_file in images:
-        if not img_file.filename:
+        safe_img = _safe_basename(img_file.filename)
+        if not safe_img:
             continue
-        ext = Path(img_file.filename).suffix.lower()
+        ext = Path(safe_img).suffix.lower()
         if ext not in SUPPORTED_IMG_EXTS:
             continue
 
         stats["total"] += 1
-        stem = Path(img_file.filename).stem
+        stem = Path(safe_img).stem
 
         # 保存原图
         img_content = await img_file.read()
-        saved_name = f"{uuid.uuid4().hex[:8]}_{img_file.filename}"
+        saved_name = f"{uuid.uuid4().hex[:8]}_{safe_img}"
         img_saved_path = upload_dir / saved_name
         img_saved_path.write_bytes(img_content)
 
@@ -378,7 +402,7 @@ async def import_voc_project(
         rel_path = f"{project.id}/{saved_name}"
         image = Image(
             project_id=project.id,
-            filename=img_file.filename,
+            filename=safe_img,
             file_path=rel_path,
             width=w, height=h,
             status="unlabeled",
@@ -392,10 +416,13 @@ async def import_voc_project(
             stats["skipped_no_xml"] += 1
             continue
 
-        # 解析 XML
+        # 解析 XML（mkstemp 避免 mktemp 的 race condition）
         xml_content = await xml_file.read()
         await xml_file.seek(0)
-        tmp_xml = Path(tempfile.mktemp(suffix='.xml'))
+        import os as _os
+        _fd, _tmp = tempfile.mkstemp(suffix='.xml', prefix='voc_')
+        _os.close(_fd)
+        tmp_xml = Path(_tmp)
         tmp_xml.write_bytes(xml_content)
 
         try:
@@ -467,9 +494,10 @@ async def scan_cls_xml_classes(files: List[UploadFile] = File(...)):
     tmp_dir = Path(tempfile.mkdtemp())
     try:
         for f in files:
-            if f.filename and f.filename.lower().endswith('.xml'):
+            name = _safe_basename(f.filename)
+            if name and name.lower().endswith('.xml'):
                 content = await f.read()
-                (tmp_dir / f.filename).write_bytes(content)
+                (tmp_dir / name).write_bytes(content)
 
         from ..services.import_service import scan_xml_classes
         # 复用 voc 扫描器：每张图取所有 <name> 标签（实际分类只有 1 个 name）
@@ -541,28 +569,30 @@ async def import_cls_project_xml(
     # 建立 XML 索引
     xml_map = {}
     for xf in xmls:
-        if xf.filename and xf.filename.lower().endswith('.xml'):
-            stem = Path(xf.filename).stem
+        safe_xf = _safe_basename(xf.filename)
+        if safe_xf and safe_xf.lower().endswith('.xml'):
+            stem = Path(safe_xf).stem
             xml_map[stem] = xf
 
     from ..services.import_service import parse_voc_xml
-    import tempfile
+    import tempfile, os as _os
 
     stats = {"total": 0, "labeled": 0, "skipped_no_xml": 0, "skipped_unknown_class": 0,
              "skipped_image_decode": 0, "class_distribution": {}}
 
     for img_file in images:
-        if not img_file.filename:
+        safe_img = _safe_basename(img_file.filename)
+        if not safe_img:
             continue
-        ext = Path(img_file.filename).suffix.lower()
+        ext = Path(safe_img).suffix.lower()
         if ext not in SUPPORTED_IMG_EXTS:
             continue
 
         stats["total"] += 1
-        stem = Path(img_file.filename).stem
+        stem = Path(safe_img).stem
 
         img_content = await img_file.read()
-        saved_name = f"{uuid.uuid4().hex[:8]}_{img_file.filename}"
+        saved_name = f"{uuid.uuid4().hex[:8]}_{safe_img}"
         img_saved_path = upload_dir / saved_name
         img_saved_path.write_bytes(img_content)
 
@@ -580,7 +610,9 @@ async def import_cls_project_xml(
         if xml_file:
             xml_content = await xml_file.read()
             await xml_file.seek(0)
-            tmp_xml = Path(tempfile.mktemp(suffix='.xml'))
+            _fd, _tmp = tempfile.mkstemp(suffix='.xml', prefix='cls_')
+            _os.close(_fd)
+            tmp_xml = Path(_tmp)
             tmp_xml.write_bytes(xml_content)
             try:
                 voc = parse_voc_xml(str(tmp_xml))
@@ -604,7 +636,7 @@ async def import_cls_project_xml(
         rel_path = f"{project.id}/{saved_name}"
         image = Image(
             project_id=project.id,
-            filename=img_file.filename,
+            filename=safe_img,
             file_path=rel_path,
             width=w, height=h,
             class_id=cls_id,

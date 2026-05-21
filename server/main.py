@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     init_db()
     # 创建默认管理员
     from .database import SessionLocal
-    from .services.auth_service import create_default_admin
+    from .services.auth_service import create_default_admin, is_using_default_secret
     db = SessionLocal()
     try:
         create_default_admin(db)
@@ -48,6 +48,9 @@ async def lifespan(app: FastAPI):
     print("  YOLO26s-Seg 标注训练平台 后端已启动")
     print(f"  API 文档: http://localhost:{settings.PORT}/docs")
     print(f"  默认管理员: admin / admin123")
+    if is_using_default_secret():
+        print("  [!! 安全告警 !!] JWT_SECRET 未配置，正在使用编译进代码的默认密钥；")
+        print("                    生产环境务必在 .env 中设置 JWT_SECRET=<随机长串>")
     print("=" * 60)
     yield
 
@@ -81,13 +84,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path
         # 不需要认证的路径
+        # 注：推断结果图片通过 /static/storage/ 提供，不需要单独的 /api/inference/image/ 白名单
         skip_auth = (
             path in AUTH_WHITELIST
             or path.startswith("/static/")
             or path.startswith("/api/auth/login")
-            or path.startswith("/api/images/") and "/file" in path   # 图片缩略图/原图
-            or path.startswith("/api/inference/image/")               # 推断结果图片
-            or path.startswith("/api/export/download/")               # 模型下载
+            or (path.startswith("/api/images/") and "/file" in path)   # 图片缩略图/原图
+            or path.startswith("/api/export/download/")                # 模型下载
         )
         if skip_auth:
             return await call_next(request)

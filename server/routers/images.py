@@ -58,10 +58,19 @@ async def upload_images(
     project_dir.mkdir(parents=True, exist_ok=True)
     thumb_dir.mkdir(parents=True, exist_ok=True)
 
+    max_size = settings.MAX_UPLOAD_SIZE
+
     for file in files:
         # 检查格式
+        if not file.filename:
+            continue
         ext = Path(file.filename).suffix.lower()
         if ext not in ALLOWED_EXTS:
+            continue
+
+        # 上传前如果框架已提供 size，先快速拒绝过大文件，避免无谓读盘
+        if file.size is not None and file.size > max_size:
+            print(f"[upload] skipped {file.filename}: size {file.size} > MAX_UPLOAD_SIZE {max_size}")
             continue
 
         # 生成唯一文件名，避免重名冲突
@@ -69,8 +78,23 @@ async def upload_images(
         save_path = project_dir / unique_name
         thumb_path = thumb_dir / f"{unique_name}.jpg"
 
-        # 保存文件
-        content = await file.read()
+        # 保存文件（流式读取以便提前发现超限，防止 OOM）
+        content_chunks: list[bytes] = []
+        total = 0
+        oversized = False
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_size:
+                oversized = True
+                break
+            content_chunks.append(chunk)
+        if oversized:
+            print(f"[upload] skipped {file.filename}: exceeded MAX_UPLOAD_SIZE {max_size} mid-stream")
+            continue
+        content = b"".join(content_chunks)
         save_path.write_bytes(content)
 
         # 读取图像尺寸
@@ -183,15 +207,26 @@ def get_image_file(
     thumb: bool = Query(default=False, description="是否返回缩略图"),
     db: Session = Depends(get_db),
 ):
-    """获取图像文件（原图或缩略图）"""
+    """获取图像文件（原图或缩略图）。
+
+    file_path 来自 DB（正常流程下由我们自己写入），但加 resolve + is_relative_to
+    防御万一 DB 被改后通过本端点读取 STORAGE_ROOT 之外的任意文件。本接口默认
+    不走 AuthMiddleware（见 main.py 白名单），所以匿名可访问，更需要这层校验。
+    """
     image = db.query(Image).filter(Image.id == image_id).first()
     if not image:
         raise HTTPException(status_code=404, detail="图像不存在")
 
+    upload_root = settings.upload_path.resolve()
     if thumb and image.thumb_path:
-        file_path = settings.upload_path / image.thumb_path
+        file_path = (settings.upload_path / image.thumb_path).resolve()
     else:
-        file_path = settings.upload_path / image.file_path
+        file_path = (settings.upload_path / image.file_path).resolve()
+
+    try:
+        file_path.relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="非法路径")
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -308,17 +343,29 @@ def get_class_stats(project_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/images/{image_id}", status_code=204)
 def delete_image(image_id: int, db: Session = Depends(get_db)):
-    """删除图像及其标注"""
+    """删除图像及其标注 + 磁盘文件。
+
+    file_path / thumb_path 来自 DB。写操作（unlink）比读取更敏感——一旦 DB 行
+    被改成 '../../../something'，没有边界校验就会删掉 STORAGE_ROOT 之外的文件。
+    """
     image = db.query(Image).filter(Image.id == image_id).first()
     if not image:
         raise HTTPException(status_code=404, detail="图像不存在")
 
-    # 删除物理文件
-    file_path = settings.upload_path / image.file_path
-    file_path.unlink(missing_ok=True)
-    if image.thumb_path:
-        thumb_path = settings.upload_path / image.thumb_path
-        thumb_path.unlink(missing_ok=True)
+    upload_root = settings.upload_path.resolve()
+
+    def _safe_unlink(rel: str | None) -> None:
+        if not rel:
+            return
+        try:
+            target = (settings.upload_path / rel).resolve()
+            target.relative_to(upload_root)
+        except (ValueError, OSError):
+            return
+        target.unlink(missing_ok=True)
+
+    _safe_unlink(image.file_path)
+    _safe_unlink(image.thumb_path)
 
     db.delete(image)
     db.commit()

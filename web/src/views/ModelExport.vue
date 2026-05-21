@@ -178,7 +178,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '../api/index'
@@ -225,6 +225,14 @@ const ptModels = computed(() => {
 onMounted(async () => {
   await loadTasks()
   await loadExports()
+})
+
+// 用户离开页面时停掉轮询，否则即便组件已卸载 setInterval 仍会一直 call loadExports
+onBeforeUnmount(() => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
 })
 
 async function loadTasks() {

@@ -275,18 +275,33 @@ function subtractEraserFromAnnotations(eraserPath:{x:number;y:number}[],eraserWi
 // ================================================================
 // 初始化
 // ================================================================
+let resizeDebounce:any=null
+function onWindowResize(){
+  clearTimeout(resizeDebounce)
+  resizeDebounce=setTimeout(()=>{
+    if(canvas&&canvasAreaRef.value){
+      canvas.setWidth(canvasAreaRef.value.clientWidth)
+      canvas.setHeight(canvasAreaRef.value.clientHeight)
+      zoomFit()
+    }
+  },200)
+}
+
 onMounted(async()=>{
   await loadProject();await loadImageList();initCanvas();await loadImageAndAnnotations()
   window.addEventListener('keydown',onKD);window.addEventListener('keyup',onKU)
   window.addEventListener('beforeunload',onBeforeUnload)
+  window.addEventListener('resize',onWindowResize)
   rootRef.value?.focus()
 })
 onBeforeUnmount(async ()=>{
   // 组件卸载前 flush 未保存改动
   if(dirty.value){try{await handleSave({silent:true,immediate:true})}catch{}}
   if(autoSaveTimer)clearTimeout(autoSaveTimer)
+  if(resizeDebounce)clearTimeout(resizeDebounce)
   window.removeEventListener('keydown',onKD);window.removeEventListener('keyup',onKU)
   window.removeEventListener('beforeunload',onBeforeUnload)
+  window.removeEventListener('resize',onWindowResize)
   if(canvas)canvas.dispose()
 })
 
@@ -398,21 +413,31 @@ async function loadImageAndAnnotations(){
   currentImage.value=imageList.value.find(i=>i.id===currentImageId.value)||null
   removeVertexHandles()
   canvas.clear();canvas.backgroundColor='#2a2a2a'
-  const url=imageApi.getFileUrl(currentImageId.value,false)
+  // 锁定本次请求对应的 imageId；如果用户在 await 期间切了图，丢弃这次返回，
+  // 否则旧请求的标注会把新图覆盖（实际表现：切到新图却显示前一张的标注）
+  const reqImageId=currentImageId.value
+  const url=imageApi.getFileUrl(reqImageId,false)
   fabric.Image.fromURL(url,(img)=>{
     if(!canvas)return
+    if(reqImageId!==currentImageId.value)return  // 已切图，旧 img 不要放上去
     img.set({selectable:false,evented:false,originX:'left',originY:'top'})
     canvas.add(img);canvas.sendToBack(img);zoomFit()
   },{crossOrigin:'anonymous'})
   try{
-    const{data}=await annotationApi.get(currentImageId.value)
+    const{data}=await annotationApi.get(reqImageId)
+    if(reqImageId!==currentImageId.value)return  // 切图了，本次响应作废
     annotations.value=data.map(a=>({
       class_id:a.class_id,
       // 加载时也 clamp，避免历史 VOC 导入的越界数据被原样回写造成 422
       polygon:sanitizePolygon((a.polygon as any[]).map(p => Array.isArray(p) ? {x:p[0],y:p[1]} : {x:p.x,y:p.y}))
     })).filter(a=>a.polygon.length>=3)
-    await nextTick();renderAnnotations()
-  }catch{annotations.value=[]}
+    await nextTick()
+    if(reqImageId!==currentImageId.value)return  // nextTick 后还得再确认一次
+    renderAnnotations()
+  }catch{
+    if(reqImageId===currentImageId.value) annotations.value=[]
+  }
+  if(reqImageId!==currentImageId.value)return
   dirty.value=false;undoStack.value=[];redoStack.value=[];selectedAnnIdx.value=-1
 }
 
@@ -948,7 +973,7 @@ function clsName(cid:number){return defectClasses.value.find(c=>c.id===cid)?.nam
 function cntCls(cid:number){return annotations.value.filter(a=>a.class_id===cid).length}
 function stText(s:string){return({unlabeled:'未标注',labeling:'标注中',labeled:'已标注',reviewed:'OK'})[s]||s}
 function imgSC(img:ImageInfo){return{'sc-u':img.status==='unlabeled','sc-l':img.status==='labeled','sc-r':img.status==='reviewed'}}
-let rt:any;window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(()=>{if(canvas&&canvasAreaRef.value){canvas.setWidth(canvasAreaRef.value.clientWidth);canvas.setHeight(canvasAreaRef.value.clientHeight);zoomFit()}},200)})
+// resize 监听器在 onMounted / onBeforeUnmount 里配对管理（见上方），避免每次进入标注页都泄漏一个监听器
 </script>
 
 <style scoped>

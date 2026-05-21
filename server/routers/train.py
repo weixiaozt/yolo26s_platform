@@ -3,13 +3,20 @@
 训练管理 API
 """
 
+import logging
+import shutil
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..models.project import Project
 from ..models.train_task import TrainTask, TrainEpochLog
 from ..schemas.train_task import TrainTaskCreate, TrainTaskOut, EpochLogOut
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["训练管理"])
 
@@ -115,7 +122,14 @@ def cancel_train_task(task_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/train/tasks/{task_id}", status_code=204)
 def delete_train_task(task_id: int, db: Session = Depends(get_db)):
-    """删除训练任务"""
+    """删除训练任务（DB + runs/task_<id>/ + 关联 ExportedModel / InferenceResult）。
+
+    ExportedModel.task_id 和 InferenceResult.task_id 没有声明外键（历史遗留），
+    所以 ORM cascade 抓不到——手动清，否则会留孤儿行 + 磁盘上的 ONNX/推断图。
+    """
+    from ..models.exported_model import ExportedModel
+    from ..models.inference_result import InferenceResult
+
     task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -133,8 +147,56 @@ def delete_train_task(task_id: int, db: Session = Depends(get_db)):
         except Exception:
             pass
 
+    # 抓出磁盘路径再删 DB（output_dir 可能为空，回退到 runs/task_<id>）
+    run_dir: Path | None = None
+    if task.output_dir:
+        run_dir = Path(task.output_dir)
+    else:
+        run_dir = Path(settings.STORAGE_ROOT).resolve() / settings.RUNS_DIR / f"task_{task_id}"
+
+    export_paths: list[str] = [
+        e.export_path for e in db.query(ExportedModel)
+            .filter(ExportedModel.task_id == task_id, ExportedModel.export_path.isnot(None))
+            .all()
+    ]
+    inference_paths: list[str] = []
+    for r in db.query(InferenceResult).filter(InferenceResult.task_id == task_id).all():
+        for p in (r.original_path, r.overlay_path, r.overlay_morph_path, r.mask_path):
+            if p:
+                inference_paths.append(p)
+
+    db.query(ExportedModel).filter(ExportedModel.task_id == task_id).delete(synchronize_session=False)
+    db.query(InferenceResult).filter(InferenceResult.task_id == task_id).delete(synchronize_session=False)
     db.delete(task)
     db.commit()
+
+    storage_root = Path(settings.STORAGE_ROOT).resolve()
+    runs_root = (storage_root / settings.RUNS_DIR).resolve()
+    try:
+        if run_dir and run_dir.exists() and run_dir.resolve().is_relative_to(runs_root):
+            shutil.rmtree(str(run_dir), ignore_errors=True)
+    except Exception:
+        log.exception("delete_train_task: failed to rm run_dir %s", run_dir)
+    for ep_str in export_paths:
+        try:
+            ep = Path(ep_str).resolve()
+            if ep.exists() and ep.is_relative_to(storage_root):
+                if ep.is_file():
+                    ep.unlink(missing_ok=True)
+                elif ep.is_dir():
+                    shutil.rmtree(str(ep), ignore_errors=True)
+        except Exception:
+            log.exception("delete_train_task: failed to rm export %s", ep_str)
+    for url in inference_paths:
+        try:
+            rel = url.replace("/static/storage/", "", 1).lstrip("/\\")
+            if not rel:
+                continue
+            target = (storage_root / rel).resolve()
+            if target.exists() and target.is_relative_to(storage_root):
+                target.unlink(missing_ok=True)
+        except Exception:
+            log.exception("delete_train_task: failed to rm inference file %s", url)
 
 
 @router.get("/projects/{project_id}/train/completed-tasks")
