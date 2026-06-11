@@ -11,7 +11,9 @@ export default defineConfig({
     Components({ resolvers: [ElementPlusResolver()] }),
   ],
   server: {
-    port: 5173,
+    host: '0.0.0.0',
+    // 默认 5174；PORT 环境变量可覆盖（preview/并行实例用）
+    port: Number(process.env.PORT) || 5174,
     proxy: {
       '/api': {
         target: 'http://localhost:8000',
