@@ -28,6 +28,8 @@
         <el-button size="small" :disabled="!canUndo" @click="undo">撤销</el-button>
         <el-button size="small" :disabled="!canRedo" @click="redo">重做</el-button>
         <el-button size="small" @click="zoomFit">适应窗口</el-button>
+        <el-button size="small" title="向左旋转90°（仅旋转视图，保存坐标自动换算回原图）" @click="rotateView(-90)"><el-icon><RefreshLeft /></el-icon></el-button>
+        <el-button size="small" title="向右旋转90°（快捷键 R）" @click="rotateView(90)"><el-icon><RefreshRight /></el-icon></el-button>
         <el-button size="small" type="danger" :disabled="annotations.length===0" @click="clearAll">清空</el-button>
       </div>
       <div class="toolbar-right">
@@ -88,6 +90,7 @@
       <span v-if="currentImage">{{ currentImage.width }}×{{ currentImage.height }}</span>
       <span>标注:{{ annotations.length }}</span>
       <span>缩放:{{ Math.round(zoomLevel*100) }}%</span>
+      <span v-if="viewRot!==0" style="color:#E6A23C">视图旋转:{{ viewRot }}°</span>
       <span v-if="currentImageIdx>=0">{{ currentImageIdx+1 }}/{{ imageList.length }}</span>
       <span style="margin-left:auto;color:#666">空格+拖拽移动 · 滚轮缩放</span>
     </div>
@@ -155,9 +158,66 @@ let circleStart:{x:number;y:number}|null=null
 let rectStart:{x:number;y:number}|null=null
 let boxEraserStart:{x:number;y:number}|null=null
 let editHandles:fabric.Circle[]=[]
-let clipboard:AnnotationData|null=null
+let clipboard:AnnotationData|null=null   // 始终存原图坐标系（不随视图旋转失效）
 let autoSaveTimer:any=null
 let isPanning=false,lastPanX=0,lastPanY=0
+
+// ================================================================
+// 视图旋转：只旋转显示与编辑坐标系，图片文件和 DB 里的标注始终是原图坐标。
+// 内存中 annotations 在"显示坐标系"下工作（这样所有绘图工具零改动），
+// 加载时 原图→显示，保存时 显示→原图。仅支持 90° 整数倍，换算无损。
+// ================================================================
+const viewRot=ref(0)                      // 0|90|180|270，顺时针
+const rotMap=new Map<number,number>()     // 本次会话内记住每张图的旋转角
+
+function rotPoint(p:Point,rot:number):Point{
+  switch(((rot%360)+360)%360){
+    case 90:return{x:1-p.y,y:p.x}
+    case 180:return{x:1-p.x,y:1-p.y}
+    case 270:return{x:p.y,y:1-p.x}
+    default:return{x:p.x,y:p.y}
+  }
+}
+const origToDisp=(p:Point)=>rotPoint(p,viewRot.value)
+const dispToOrig=(p:Point)=>rotPoint(p,(360-viewRot.value)%360)
+function transformAnns(anns:AnnotationData[],fn:(p:Point)=>Point):AnnotationData[]{
+  return anns.map(a=>({...a,polygon:a.polygon.map(fn)}))
+}
+// 显示坐标系下的图像尺寸（旋转 90/270 时宽高互换）
+function dispW():number{if(!currentImage.value)return 1;return viewRot.value%180===0?currentImage.value.width:currentImage.value.height}
+function dispH():number{if(!currentImage.value)return 1;return viewRot.value%180===0?currentImage.value.height:currentImage.value.width}
+
+// fabric 以对象左上角为原点旋转；旋转后平移，使图像 bbox 左上角回到场景 (0,0)
+function placeBgImage(img:fabric.Image){
+  const iw=img.width||1,ih=img.height||1
+  let left=0,top=0
+  if(viewRot.value===90)left=ih
+  else if(viewRot.value===180){left=iw;top=ih}
+  else if(viewRot.value===270)top=iw
+  img.set({angle:viewRot.value,left,top})
+  img.setCoords()
+}
+
+function rotateView(delta:number){
+  if(!canvas||!currentImage.value)return
+  cancelDrawing()
+  removeVertexHandles()
+  const oldRot=viewRot.value
+  const newRot=(((oldRot+delta)%360)+360)%360
+  // 标注：旧显示坐标系 → 原图坐标系 → 新显示坐标系
+  const remap=(p:Point)=>rotPoint(rotPoint(p,(360-oldRot)%360),newRot)
+  annotations.value=transformAnns(annotations.value,remap)
+  // undo/redo 栈同步换算，避免旋转后撤销跳回旧坐标系
+  undoStack.value=undoStack.value.map(s=>JSON.stringify(transformAnns(JSON.parse(s),remap)))
+  redoStack.value=redoStack.value.map(s=>JSON.stringify(transformAnns(JSON.parse(s),remap)))
+  viewRot.value=newRot
+  rotMap.set(currentImageId.value,newRot)
+  const bg=canvas.getObjects().find((o:any)=>o._bg) as fabric.Image|undefined
+  if(bg)placeBgImage(bg)
+  renderAnnotations()
+  if(currentTool.value==='select'&&selectedAnnIdx.value>=0)showVertexHandles(selectedAnnIdx.value)
+  zoomFit()
+}
 
 // ================================================================
 // 栅格化→轮廓提取（涂抹/折线共用）
@@ -200,7 +260,7 @@ function scanContour(ctx:CanvasRenderingContext2D,cw:number,ch:number,ox:number,
 // ================================================================
 function subtractEraserFromAnnotations(eraserPath:{x:number;y:number}[],eraserWidth:number){
   if(!currentImage.value||eraserPath.length<2)return
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   const pad=eraserWidth+4
   // 擦除路径包围盒
   let ex1=Infinity,ey1=Infinity,ex2=-Infinity,ey2=-Infinity
@@ -312,7 +372,8 @@ function onBeforeUnload(e:BeforeUnloadEvent){
     // 同步发起保存（async 不会等，但浏览器 beacon 可以）
     try{
       const url=`/api/images/${currentImageId.value}/annotations`
-      const blob=new Blob([JSON.stringify({annotations:annotations.value})],{type:'application/json'})
+      // beacon 同样要换算回原图坐标系
+      const blob=new Blob([JSON.stringify({annotations:transformAnns(annotations.value,dispToOrig)})],{type:'application/json'})
       navigator.sendBeacon&&navigator.sendBeacon(url,blob)
     }catch{}
   }
@@ -411,6 +472,7 @@ function onToolChange(){
 async function loadImageAndAnnotations(){
   if(!canvas)return
   currentImage.value=imageList.value.find(i=>i.id===currentImageId.value)||null
+  viewRot.value=rotMap.get(currentImageId.value)??0
   removeVertexHandles()
   canvas.clear();canvas.backgroundColor='#2a2a2a'
   // 锁定本次请求对应的 imageId；如果用户在 await 期间切了图，丢弃这次返回，
@@ -421,6 +483,8 @@ async function loadImageAndAnnotations(){
     if(!canvas)return
     if(reqImageId!==currentImageId.value)return  // 已切图，旧 img 不要放上去
     img.set({selectable:false,evented:false,originX:'left',originY:'top'})
+    ;(img as any)._bg=true
+    placeBgImage(img)
     canvas.add(img);canvas.sendToBack(img);zoomFit()
   },{crossOrigin:'anonymous'})
   try{
@@ -428,8 +492,9 @@ async function loadImageAndAnnotations(){
     if(reqImageId!==currentImageId.value)return  // 切图了，本次响应作废
     annotations.value=data.map(a=>({
       class_id:a.class_id,
-      // 加载时也 clamp，避免历史 VOC 导入的越界数据被原样回写造成 422
-      polygon:sanitizePolygon((a.polygon as any[]).map(p => Array.isArray(p) ? {x:p[0],y:p[1]} : {x:p.x,y:p.y}))
+      // 加载时也 clamp，避免历史 VOC 导入的越界数据被原样回写造成 422；
+      // 再从原图坐标系换算到当前显示坐标系（viewRot=0 时为恒等）
+      polygon:sanitizePolygon((a.polygon as any[]).map(p => Array.isArray(p) ? {x:p[0],y:p[1]} : {x:p.x,y:p.y})).map(origToDisp)
     })).filter(a=>a.polygon.length>=3)
     await nextTick()
     if(reqImageId!==currentImageId.value)return  // nextTick 后还得再确认一次
@@ -444,7 +509,7 @@ async function loadImageAndAnnotations(){
 function renderAnnotations(){
   if(!canvas||!currentImage.value)return
   canvas.getObjects().filter(o=>(o as any)._ann).forEach(o=>canvas!.remove(o))
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   // select 工具下让 polygon 可拖动整体平移（其他工具下保持 evented=true 用于点击选中，但禁拖）
   const isSelectTool=currentTool.value==='select'
   annotations.value.forEach((ann,idx)=>{
@@ -471,7 +536,7 @@ function renderAnnotations(){
       const dx=(poly.left||0)-dragOrigin.left
       const dy=(poly.top||0)-dragOrigin.top
       // 实时同步顶点 handles 跟随
-      const W2=currentImage.value.width,H2=currentImage.value.height
+      const W2=dispW(),H2=dispH()
       const ann_=annotations.value[idx]
       if(!ann_)return
       editHandles.forEach((h,i)=>{
@@ -490,7 +555,7 @@ function renderAnnotations(){
       // 阈值过滤：< 0.5px 视为没动（避免单击也触发 dirty）
       if(Math.abs(dx)<0.5&&Math.abs(dy)<0.5)return
       pushUndo()
-      const W2=currentImage.value.width,H2=currentImage.value.height
+      const W2=dispW(),H2=dispH()
       annotations.value[idx].polygon=annotations.value[idx].polygon.map(p=>({
         x:Math.max(0,Math.min(1,p.x+dx/W2)),
         y:Math.max(0,Math.min(1,p.y+dy/H2)),
@@ -515,7 +580,7 @@ function onPolyClick(p:{x:number;y:number}){
 }
 function finishPolygon(){
   if(!currentImage.value||drawingPoints.length<3){cancelDrawing();return}
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   addAnn(drawingPoints.map(p=>({x:p.x/W,y:p.y/H})));cancelDrawing()
 }
 
@@ -523,7 +588,7 @@ function finishPolygon(){
 function finishBrush(){
   isBrushing=false;cleanTmp()
   if(!currentImage.value||brushPts.length<2)return
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   const poly=rasterContour(brushPts,brushSize.value,W,H)
   if(poly.length>=3)addAnn(poly)
 }
@@ -536,7 +601,7 @@ function onPolylineClick(p:{x:number;y:number}){
 }
 function finishPolyline(){
   if(!currentImage.value||drawingPoints.length<2){cancelDrawing();return}
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   const poly=rasterContour(drawingPoints,brushSize.value,W,H)
   if(poly.length>=3)addAnn(poly);cancelDrawing()
 }
@@ -553,7 +618,7 @@ function finishCircle(p:{x:number;y:number}){
   if(!currentImage.value||!circleStart){circleStart=null;cleanTmp();return}
   const r=Math.sqrt((p.x-circleStart.x)**2+(p.y-circleStart.y)**2)
   if(r<2){circleStart=null;cleanTmp();return}
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   const poly:Point[]=[];for(let i=0;i<32;i++){const a=2*Math.PI*i/32;poly.push({x:Math.max(0,Math.min(1,(circleStart.x+r*Math.cos(a))/W)),y:Math.max(0,Math.min(1,(circleStart.y+r*Math.sin(a))/H))})}
   addAnn(poly);circleStart=null;cleanTmp()
 }
@@ -569,7 +634,7 @@ function drawRectPrev(p:{x:number;y:number}){
 }
 function finishRect(p:{x:number;y:number}){
   if(!currentImage.value||!rectStart){rectStart=null;cleanTmp();return}
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   const x1=Math.min(rectStart.x,p.x),y1=Math.min(rectStart.y,p.y)
   const x2=Math.max(rectStart.x,p.x),y2=Math.max(rectStart.y,p.y)
   if(x2-x1<3||y2-y1<3){rectStart=null;cleanTmp();return} // 太小忽略
@@ -597,7 +662,7 @@ function drawBoxRect(p:{x:number;y:number}){
 }
 function finishBoxEraser(){
   if(!canvas||!boxEraserStart||!currentImage.value){boxEraserStart=null;cleanTmp();return}
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   const t=canvas.getObjects().find(o=>(o as any)._tmp&&o.type==='rect') as fabric.Rect
   if(!t){boxEraserStart=null;return}
   const l=(t.left||0)/W,tp=(t.top||0)/H,r=l+(t.width||0)/W,b=tp+(t.height||0)/H
@@ -703,7 +768,7 @@ function showVertexHandles(idx:number){
   if(!canvas||!currentImage.value)return
   const ann=annotations.value[idx]
   if(!ann)return
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
 
   // ---- 旋转手柄（绿色圆点，在 polygon 上方）----
   const xsAll=ann.polygon.map(p=>p.x*W)
@@ -748,7 +813,7 @@ function showVertexHandles(idx:number){
   rotHandle.on('moving',()=>{
     if(!origPoly||!currentImage.value)return
     rotMoved=true
-    const W2=currentImage.value.width,H2=currentImage.value.height
+    const W2=dispW(),H2=dispH()
     const hx=(rotHandle.left||0)+rotR
     const hy=(rotHandle.top||0)+rotR
     const angleNow=Math.atan2(hy-rotCy,hx-rotCx)
@@ -811,7 +876,7 @@ function showVertexHandles(idx:number){
       if(!currentImage.value)return
       // 第一次移动才入栈，避免单击也 push undo
       if(firstMove){pushUndo();firstMove=false}
-      const W2=currentImage.value.width,H2=currentImage.value.height
+      const W2=dispW(),H2=dispH()
       const cx=(handle.left||0)+3,cy=(handle.top||0)+3
       // clamp 到画布范围（防止越界后端 422）
       const nx=Math.max(0,Math.min(1,cx/W2))
@@ -854,15 +919,16 @@ function copyAnn(){
   if(selectedAnnIdx.value<0)return
   const ann=annotations.value[selectedAnnIdx.value]
   if(!ann)return
-  clipboard=JSON.parse(JSON.stringify(ann))
+  // 剪贴板统一存原图坐标系，粘贴时再转当前显示坐标系（旋转前后复制粘贴不错位）
+  clipboard={class_id:ann.class_id,polygon:ann.polygon.map(dispToOrig)}
   ElMessage.info('已复制')
 }
 function pasteAnn(){
   if(!clipboard||!currentImage.value)return
-  const W=currentImage.value.width,H=currentImage.value.height
+  const W=dispW(),H=dispH()
   // 像素偏移 20px，转归一化
   const dx=20/W,dy=20/H
-  const newPoly=clipboard.polygon.map(p=>({
+  const newPoly=clipboard.polygon.map(origToDisp).map(p=>({
     x:Math.max(0,Math.min(1,p.x+dx)),
     y:Math.max(0,Math.min(1,p.y+dy)),
   }))
@@ -897,11 +963,12 @@ async function handleSave(opt:{silent?:boolean;immediate?:boolean}={}){
   if(!dirty.value && !opt.immediate) return
   const imgId=currentImageId.value
   saving.value=true; saveState.value='saving'
-  // 提交前对所有标注做兜底 sanitize：兼容历史 VOC 导入数据中的越界顶点
+  // 提交前：显示坐标系 → 原图坐标系（viewRot=0 时为恒等），
+  // 再做兜底 sanitize：兼容历史 VOC 导入数据中的越界顶点
   // (后端 PointSchema 强制 [0,1]，越界值会 422)
   const safeAnns=annotations.value.map(a=>({
     ...a,
-    polygon:sanitizePolygon(a.polygon),
+    polygon:sanitizePolygon(a.polygon.map(dispToOrig)),
   })).filter(a=>a.polygon.length>=3)
   try{
     await annotationApi.save(imgId,safeAnns)
@@ -945,9 +1012,10 @@ function nextImage(){if(hasNext.value)switchImage(imageList.value[currentImageId
 function goBack(){router.push(`/project/${props.projectId}`)}
 function zoomFit(){
   if(!canvas||!canvasAreaRef.value)return
-  const bg=canvas.getObjects().find(o=>!(o as any)._ann&&!(o as any)._tmp);if(!bg)return
+  const bg=canvas.getObjects().find(o=>(o as any)._bg);if(!bg)return
+  // 用显示坐标系尺寸（旋转 90/270 时宽高互换），不能直接用 fabric 对象的 width/height
   const cw=canvasAreaRef.value.clientWidth,ch=canvasAreaRef.value.clientHeight
-  const iw=(bg as fabric.Image).width||1,ih=(bg as fabric.Image).height||1
+  const iw=dispW(),ih=dispH()
   const z=Math.min(cw/iw,ch/ih)*0.95
   canvas.setViewportTransform([1,0,0,1,0,0])
   canvas.zoomToPoint(new fabric.Point(cw/2,ch/2),z)
@@ -965,6 +1033,7 @@ function onKD(e:KeyboardEvent){
   else if(e.ctrlKey&&(e.key==='v'||e.key==='V')){e.preventDefault();pasteAnn()}
   else if(!e.ctrlKey&&(e.key==='a'||e.key==='ArrowLeft'))prevImage()
   else if(!e.ctrlKey&&(e.key==='d'||e.key==='ArrowRight'))nextImage()
+  else if(!e.ctrlKey&&(e.key==='r'||e.key==='R'))rotateView(90)
 }
 function onKU(e:KeyboardEvent){if(e.code==='Space')spaceDown.value=false}
 function getThumbUrl(id:number){return imageApi.getFileUrl(id,true)}
