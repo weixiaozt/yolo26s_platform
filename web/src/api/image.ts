@@ -62,4 +62,8 @@ export const imageApi = {
 
   delete: (imageId: number) =>
     api.delete(`/images/${imageId}`),
+
+  /** 批量删除图像（标注与磁盘文件一并删除） */
+  batchDelete: (imageIds: number[]) =>
+    api.post<{ ok: boolean; deleted: number }>(`/images/batch-delete`, { image_ids: imageIds }),
 }

@@ -341,31 +341,54 @@ def get_class_stats(project_id: int, db: Session = Depends(get_db)):
     return {"by_class": by_class, "unlabeled": unlabeled, "total": total}
 
 
-@router.delete("/images/{image_id}", status_code=204)
-def delete_image(image_id: int, db: Session = Depends(get_db)):
-    """删除图像及其标注 + 磁盘文件。
+def _safe_unlink_under(upload_root: Path, rel: str | None) -> None:
+    """删除 upload_root 下的相对路径文件；越界路径直接忽略。
 
-    file_path / thumb_path 来自 DB。写操作（unlink）比读取更敏感——一旦 DB 行
+    rel 来自 DB。写操作（unlink）比读取更敏感——一旦 DB 行
     被改成 '../../../something'，没有边界校验就会删掉 STORAGE_ROOT 之外的文件。
     """
+    if not rel:
+        return
+    try:
+        target = (settings.upload_path / rel).resolve()
+        target.relative_to(upload_root)
+    except (ValueError, OSError):
+        return
+    target.unlink(missing_ok=True)
+
+
+@router.delete("/images/{image_id}", status_code=204)
+def delete_image(image_id: int, db: Session = Depends(get_db)):
+    """删除图像及其标注 + 磁盘文件。"""
     image = db.query(Image).filter(Image.id == image_id).first()
     if not image:
         raise HTTPException(status_code=404, detail="图像不存在")
 
     upload_root = settings.upload_path.resolve()
-
-    def _safe_unlink(rel: str | None) -> None:
-        if not rel:
-            return
-        try:
-            target = (settings.upload_path / rel).resolve()
-            target.relative_to(upload_root)
-        except (ValueError, OSError):
-            return
-        target.unlink(missing_ok=True)
-
-    _safe_unlink(image.file_path)
-    _safe_unlink(image.thumb_path)
+    _safe_unlink_under(upload_root, image.file_path)
+    _safe_unlink_under(upload_root, image.thumb_path)
 
     db.delete(image)
     db.commit()
+
+
+@router.post("/images/batch-delete")
+def batch_delete_images(
+    body: dict,  # {"image_ids": [int]}
+    db: Session = Depends(get_db),
+):
+    """批量删除图像及其标注 + 磁盘文件（一个事务内完成）。"""
+    image_ids = body.get("image_ids") or []
+    if not isinstance(image_ids, list) or not image_ids:
+        raise HTTPException(status_code=400, detail="image_ids 不能为空")
+    if not all(isinstance(i, int) and not isinstance(i, bool) for i in image_ids):
+        raise HTTPException(status_code=400, detail="image_ids 必须是整数列表")
+
+    upload_root = settings.upload_path.resolve()
+    images = db.query(Image).filter(Image.id.in_(image_ids)).all()
+    for image in images:
+        _safe_unlink_under(upload_root, image.file_path)
+        _safe_unlink_under(upload_root, image.thumb_path)
+        db.delete(image)
+    db.commit()
+    return {"ok": True, "deleted": len(images)}

@@ -87,6 +87,24 @@
         <el-radio-button label="reviewed">OK</el-radio-button>
       </el-radio-group>
       <span class="total-hint">共 {{ imageTotal }} 张</span>
+      <div class="batch-actions">
+        <template v-if="batchMode">
+          <span class="total-hint">已选 {{ selectedIds.size }} 张</span>
+          <el-button size="small" @click="selectAllOnPage">全选本页</el-button>
+          <el-button size="small" :disabled="selectedIds.size === 0" @click="clearSelection">清空选择</el-button>
+          <el-button
+            size="small" type="danger"
+            :disabled="selectedIds.size === 0"
+            :loading="batchDeleting"
+            @click="handleBatchDelete"
+          >
+            <el-icon><Delete /></el-icon>
+            删除选中
+          </el-button>
+          <el-button size="small" @click="exitBatchMode">退出批量</el-button>
+        </template>
+        <el-button v-else size="small" @click="batchMode = true">批量选择</el-button>
+      </div>
     </div>
 
     <!-- 图像网格 -->
@@ -94,11 +112,17 @@
       <el-card
         v-for="img in images"
         :key="img.id"
-        class="image-card"
+        :class="['image-card', { 'batch-selected': batchMode && selectedIds.has(img.id) }]"
         shadow="hover"
         :body-style="{ padding: 0 }"
-        @click="goAnnotate(img.id)"
+        @click="onCardClick(img)"
       >
+        <div
+          v-if="batchMode"
+          :class="['batch-check', { checked: selectedIds.has(img.id) }]"
+        >
+          <el-icon v-if="selectedIds.has(img.id)"><Check /></el-icon>
+        </div>
         <img
           :src="getThumbUrl(img.id)"
           class="thumb"
@@ -119,6 +143,7 @@
               {{ img.annotation_count }} 个标注
             </span>
             <el-button
+              v-if="!batchMode"
               type="danger" text size="small"
               @click.stop="handleDeleteImage(img.id, img.filename)"
               style="margin-left: auto;"
@@ -334,6 +359,59 @@ async function handleDeleteImage(imageId: number, filename: string) {
   } catch {}
 }
 
+// ---- 批量选择 / 批量删除 ----
+const batchMode = ref(false)
+const selectedIds = ref(new Set<number>())
+const batchDeleting = ref(false)
+
+function onCardClick(img: ImageInfo) {
+  if (!batchMode.value) {
+    goAnnotate(img.id)
+    return
+  }
+  if (selectedIds.value.has(img.id)) selectedIds.value.delete(img.id)
+  else selectedIds.value.add(img.id)
+}
+
+function selectAllOnPage() {
+  images.value.forEach((i) => selectedIds.value.add(i.id))
+}
+
+function clearSelection() {
+  selectedIds.value = new Set()
+}
+
+function exitBatchMode() {
+  batchMode.value = false
+  selectedIds.value = new Set()
+}
+
+async function handleBatchDelete() {
+  const n = selectedIds.value.size
+  if (n === 0) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${n} 张图像？图像文件和标注都会一并删除，不可恢复。`,
+      '批量删除',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch { return }
+  batchDeleting.value = true
+  try {
+    const { data } = await imageApi.batchDelete([...selectedIds.value])
+    ElMessage.success(`已删除 ${data.deleted} 张图像`)
+    selectedIds.value = new Set()
+    loadProject()
+    // 当前页可能被删空：回退到仍有内容的页
+    const maxPage = Math.max(1, Math.ceil((imageTotal.value - data.deleted) / pageSize))
+    loadImages(Math.min(page.value, maxPage))
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '批量删除失败')
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
 function onFileChange(file: UploadFile) {
   if (file.raw) uploadFiles.value.push(file.raw)
 }
@@ -457,6 +535,40 @@ function randomColor() {
   align-items: center;
   gap: 16px;
   margin-bottom: 20px;
+}
+.batch-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.image-card {
+  position: relative;
+  cursor: pointer;
+}
+.image-card.batch-selected {
+  outline: 2px solid #409eff;
+}
+.batch-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 14px;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+}
+.batch-check.checked {
+  background: #409eff;
+  border-color: #409eff;
 }
 .total-hint {
   font-size: 13px;
