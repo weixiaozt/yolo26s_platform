@@ -33,14 +33,18 @@ _model_cache: dict = {}
 _TASK_MAP = {"seg": "segment", "det": "detect", "cls": "classify", "obb": "obb"}
 
 
-def _get_model(model_path: str, task_type: str | None = None):
+def _get_model(model_path: str, task_type: str | None = None, device: str | None = None):
     """加载模型（LRU 缓存，容量 4）。
 
     task_type: 我们项目的 task_type（seg/det/cls/obb），用于在加载非 .pt 模型
     （ONNX / OpenVINO / TensorRT）时显式告诉 ultralytics 是哪种任务，否则
     它默认按 detect 处理 cls 模型会跑 NMS，报 IndexError。
+
+    device: cache key 的一部分。OpenVINO backend 在首次 predict 时把模型编译
+    到指定硬件（CPU/GPU.0），切换 device 等于重新编译，所以缓存必须按 device
+    区分；否则用户从 GPU.0 切回 CPU 时会拿到上次的 GPU.0 编译版本。
     """
-    cache_key = f"{model_path}|{task_type or ''}"
+    cache_key = f"{model_path}|{task_type or ''}|{device or ''}"
     if cache_key in _model_cache:
         _model_cache[cache_key] = _model_cache.pop(cache_key)
         return _model_cache[cache_key]
@@ -394,7 +398,7 @@ def _run_inference_core(
         if proj and proj.task_type:
             task_type = proj.task_type
 
-    model = _get_model(mp, task_type=task_type)
+    model = _get_model(mp, task_type=task_type, device=device)
 
     # 分类：整图 letterbox 到 imgsz；不滑窗
     if task_type == "cls":

@@ -966,7 +966,10 @@ def _sliding_window_with_yolo_labels(
                         continue
                     pts_array = np.array(local_points, dtype=np.float32)
                     area = cv2.contourArea(pts_array)
-                    if area < 25:
+                    # 阈值 9 是 3x3 像素的最小可学物体，适配工业微小缺陷（如硅片
+                    # 崩边在 4096 → resize 2048 后只剩 3x3 = 9 px²，原阈值 25 会
+                    # 把整个崩边类别滤掉，导致训练集类别不全。
+                    if area < 9:
                         continue
 
                     coords_str = " ".join(f"{lx / crop_size:.6f} {ly / crop_size:.6f}" for lx, ly in local_points)

@@ -167,34 +167,35 @@ def _get_openvino_device(device: str = None) -> str:
 def _format_device_for_backend(device: str, model_type: str) -> str:
     """
     根据后端类型格式化设备字符串。
-    
+
     Args:
         device: 原始设备名称
         model_type: 模型类型 (pytorch, openvino, tensorrt)
-        
+
     Returns:
         格式化后的设备字符串，None 表示不指定（使用默认值）
     """
     if not device:
         return None
-    
+
     device_upper = device.upper()
-    
+
     if model_type == "openvino":
-        # OpenVINO 的设备参数格式: "cpu", "gpu", "npu" 等（小写）
-        # Ultralytics 内部会转换为大写传递给 OpenVINO
+        # ultralytics 8.4+ OpenVINOBackend 要求 device 必须是 "intel:XXX" 格式
+        # 否则会被忽略，永远走 AUTO（实际默认 CPU）
+        # 参考 ultralytics/nn/backends/openvino.py L36-41
         if device_upper == "CPU":
-            return "cpu"
+            return "intel:CPU"
         elif device_upper in ["GPU", "GPU.0", "IGPU"]:
-            return "gpu"
+            return "intel:GPU.0"
         elif device_upper in ["GPU.1", "DGPU"]:
-            return "gpu.1"  # 某些版本的 OpenVINO 支持指定 GPU 索引
+            return "intel:GPU.1"
         elif device_upper == "NPU":
-            return "npu"
+            return "intel:NPU"
         elif device_upper == "AUTO":
-            return None  # 自动选择，不传递 device 参数
+            return None  # 让 ultralytics 走默认 AUTO
         else:
-            return device.lower()
+            return f"intel:{device_upper}"
     elif model_type == "tensorrt":
         # TensorRT 使用 CUDA 设备索引，如 '0', '1' 或 'cpu'
         if device_upper == "CPU":
@@ -347,13 +348,9 @@ def infer_single_image(
     }
     
     # 根据后端类型处理设备参数
-    if model_type == 'openvino':
-        # OpenVINO 模型：不传递 device 参数给 predict()
-        # 因为 predict 的 device 参数会被错误地传递给 PyTorch 的 select_device
-        # OpenVINO 的设备选择应该由模型加载时自动处理
-        pass
-    elif device:
-        # PyTorch/TensorRT 模型：正常传递 device 参数
+    # OpenVINO 也要传 device（"intel:GPU.0" 等），由 ultralytics 在 setup_model 时
+    # 解析为目标硬件；不传则永远走 CPU AUTO（device bug 修复，2026-06）
+    if device:
         formatted_device = _format_device_for_backend(device, model_type)
         if formatted_device:
             predict_kwargs['device'] = formatted_device
