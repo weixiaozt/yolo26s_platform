@@ -98,11 +98,16 @@
                   <el-option label="yolo11x-obb.pt · XLarge — 最精准，~58M 参数" value="yolo11x-obb.pt" />
                 </template>
                 <template v-else>
-                  <el-option label="yolo26n-seg · Nano — 最快，~3M 参数，适合快速验证" value="yolo26n-seg" />
-                  <el-option label="yolo26s-seg · Small — 均衡，~24M 参数（推荐）" value="yolo26s-seg" />
-                  <el-option label="yolo26m-seg · Medium — 更精准，~40M 参数" value="yolo26m-seg" />
-                  <el-option label="yolo26l-seg · Large — 高精度，~63M 参数" value="yolo26l-seg" />
-                  <el-option label="yolo26x-seg · XLarge — 最精准，~97M 参数" value="yolo26x-seg" />
+                  <el-option label="yolo11n-seg · Nano — 最快，~3M 参数（OpenVINO 兼容好）" value="yolo11n-seg" />
+                  <el-option label="yolo11s-seg · Small — 均衡，~10M 参数（推荐 / OpenVINO 兼容好）" value="yolo11s-seg" />
+                  <el-option label="yolo11m-seg · Medium — 更精准，~22M 参数（OpenVINO 兼容好）" value="yolo11m-seg" />
+                  <el-option label="yolo11l-seg · Large — 高精度，~28M 参数" value="yolo11l-seg" />
+                  <el-option label="yolo11x-seg · XLarge — 最精准，~62M 参数" value="yolo11x-seg" />
+                  <el-option label="yolo26n-seg · Nano — ~3M 参数（⚠ OV 推理与 PT 不一致）" value="yolo26n-seg" />
+                  <el-option label="yolo26s-seg · Small — ~24M 参数（⚠ OV 推理与 PT 不一致）" value="yolo26s-seg" />
+                  <el-option label="yolo26m-seg · Medium — ~40M 参数（⚠ OV 推理与 PT 不一致）" value="yolo26m-seg" />
+                  <el-option label="yolo26l-seg · Large — ~63M 参数（⚠ OV 推理与 PT 不一致）" value="yolo26l-seg" />
+                  <el-option label="yolo26x-seg · XLarge — ~97M 参数（⚠ OV 推理与 PT 不一致）" value="yolo26x-seg" />
                 </template>
               </el-select>
               <span class="hint">模型越大精度越高，但速度越慢、显存占用越大</span>
@@ -309,7 +314,7 @@ const taskType = ref<'seg'|'det'|'cls'|'obb'>('seg')
 // ---- 默认参数（按 task_type 分支生成）----
 function getBaseDefaults() {
   return {
-    model_name: 'yolo26s-seg',
+    model_name: 'yolo11s-seg',
     epochs: 200, batch_size: 8, patience: 50, device: '0',
     lr0: 0.01, lrf: 0.01, momentum: 0.937, weight_decay: 0.0005,
     warmup_epochs: 3, warmup_momentum: 0.8,
