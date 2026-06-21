@@ -66,7 +66,9 @@ def list_train_tasks(project_id: int, db: Session = Depends(get_db)):
     tasks = (
         db.query(TrainTask)
         .filter(TrainTask.project_id == project_id)
-        .order_by(TrainTask.created_at.desc())
+        # 加 id 做 tiebreaker：created_at 精度只到秒，并行提交的多个 task
+        # 时间会完全相同，仅按时间排序会按插入顺序（正序）返回，最新的反而沉底。
+        .order_by(TrainTask.created_at.desc(), TrainTask.id.desc())
         .all()
     )
     result = []
@@ -116,6 +118,10 @@ def cancel_train_task(task_id: int, db: Session = Depends(get_db)):
         celery_app.control.revoke(task.celery_task_id, terminate=True)
 
     task.status = "cancelled"
+    # 覆盖 finished_at 为本次 cancel 时间；上一次跑剩的旧值会让前端按
+    # (旧finished_at - 新started_at) 算出负耗时（复跑场景）。
+    from datetime import datetime as _dt
+    task.finished_at = _dt.now()
     db.commit()
     return {"ok": True, "message": "任务已取消"}
 

@@ -36,8 +36,8 @@
         </el-table-column>
         <el-table-column label="耗时" width="120">
           <template #default="{row}">
-            <span v-if="row.started_at && row.finished_at">{{ duration(row.started_at, row.finished_at) }}</span>
-            <span v-else-if="row.started_at">运行中...</span>
+            <span v-if="['pending','preparing','training','exporting'].includes(row.status)">运行中...</span>
+            <span v-else-if="row.started_at && row.finished_at">{{ duration(row.started_at, row.finished_at) }}</span>
             <span v-else style="color:#999">-</span>
           </template>
         </el-table-column>

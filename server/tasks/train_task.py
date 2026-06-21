@@ -45,6 +45,12 @@ def run_training_pipeline(self, task_id: int):
         if not task:
             return {"error": f"Task {task_id} not found"}
 
+        # 已落终态的任务在 worker 重启时可能被 Celery 重新分发（acks_late
+        # 未消费的 task 会重投），不能让 "preparing" 把 cancelled 覆盖回去。
+        if task.status in ("cancelled", "completed", "failed"):
+            print(f"[task_{task_id}] status={task.status}, skip duplicate execution")
+            return {"skipped": True, "status": task.status}
+
         config = task.config or {}
         project_id = task.project_id
 
@@ -56,6 +62,9 @@ def run_training_pipeline(self, task_id: int):
         # 更新状态
         task.status = "preparing"
         task.started_at = datetime.now()
+        # 清掉上次跑剩的 finished_at（重启复跑场景），避免前端按
+        # finished_at-started_at 算出负耗时
+        task.finished_at = None
         db.commit()
 
         # ---- 任务目录 ----
