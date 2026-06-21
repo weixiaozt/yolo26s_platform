@@ -35,6 +35,116 @@ from ..models.annotation import Annotation
 from ..models.defect_class import DefectClass
 
 
+def _merge_close_polygons_by_class(annotations, class_map, img_w, img_h,
+                                   cluster_thresh=80, closing_kernel=100):
+    """把同类相邻 polygon 合并成一个 instance。
+
+    场景：大缺陷被分多次涂抹生成 N 个独立 annotation（YOLO 实例分割视角
+    下是 N 个独立 instance），训练后模型学到分段形态，推理输出 N 个小框
+    拼不回整体（如硅片 V 型大缺口边缘被多次涂抹拆成 4-8 段）。
+
+    算法（两步）：
+      1. 同类内按 bbox 边距聚类：距离 < cluster_thresh px 的 polygon 归
+         同一簇（union-find），覆盖"同一缺陷分多段"场景。
+      2. 单簇 polygon 转 mask → morph closing(closing_kernel) → contours
+         → 拟合回 polygon，相邻段连成一片。
+
+    参数（基于项目 8 实测段间距分布 median=58 P75=219 max=635 px 选定）：
+      - cluster_thresh=80: 段间距 < 80 px 视为同一缺陷的多段。超过则视为
+        独立缺陷，保留不合。
+      - closing_kernel=100: 簇内段间隙用 30 px 核闭运算桥接。
+
+    Returns: [(cls_index, [(x_norm, y_norm), ...]), ...]
+    """
+    import numpy as np
+    import cv2
+    from collections import defaultdict
+
+    # 按类分组 + 坐标归一化
+    groups = defaultdict(list)
+    for ann in annotations:
+        cls_index = class_map.get(ann.class_id)
+        if cls_index is None or not ann.polygon or len(ann.polygon) < 3:
+            continue
+        pts = []
+        for p in ann.polygon:
+            if isinstance(p, dict):
+                px, py = p['x'], p['y']
+            else:
+                px, py = p[0], p[1]
+            if px > 1 or py > 1:
+                px = px / img_w
+                py = py / img_h
+            pts.append((px, py))
+        groups[cls_index].append(pts)
+
+    def _bbox_dist(b1, b2):
+        """两个 bbox 之间最近边的距离，重叠则 0。"""
+        dx = max(0.0, max(b1[0], b2[0]) - min(b1[2], b2[2]))
+        dy = max(0.0, max(b1[1], b2[1]) - min(b1[3], b2[3]))
+        return (dx * dx + dy * dy) ** 0.5
+
+    out = []
+    for cls_index, polys in groups.items():
+        if len(polys) == 1:
+            out.append((cls_index, polys[0]))
+            continue
+
+        # 计算每个 polygon 的 bbox（像素坐标）
+        bboxes = []
+        for poly in polys:
+            xs = [p[0] * img_w for p in poly]
+            ys = [p[1] * img_h for p in poly]
+            bboxes.append((min(xs), min(ys), max(xs), max(ys)))
+
+        # 层次聚类（union-find）：距离 < cluster_thresh 的归一簇
+        n = len(polys)
+        parent = list(range(n))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if _bbox_dist(bboxes[i], bboxes[j]) < cluster_thresh:
+                    px_, py_ = find(i), find(j)
+                    if px_ != py_:
+                        parent[px_] = py_
+
+        clusters = defaultdict(list)
+        for i in range(n):
+            clusters[find(i)].append(i)
+
+        # 每个簇独立处理：单 polygon 直接保留，多 polygon 走 closing
+        for cluster_idxs in clusters.values():
+            if len(cluster_idxs) == 1:
+                out.append((cls_index, polys[cluster_idxs[0]]))
+                continue
+            mask = np.zeros((img_h, img_w), dtype=np.uint8)
+            for idx in cluster_idxs:
+                pixel_pts = np.array(
+                    [[int(px * img_w), int(py * img_h)] for px, py in polys[idx]],
+                    dtype=np.int32,
+                )
+                cv2.fillPoly(mask, [pixel_pts], 255)
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (closing_kernel, closing_kernel))
+            closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in contours:
+                if cv2.contourArea(c) < 9:
+                    continue
+                eps = max(1.0, 0.003 * cv2.arcLength(c, True))
+                approx = cv2.approxPolyDP(c, eps, True)
+                if len(approx) < 3:
+                    continue
+                normed = [(float(p[0][0]) / img_w, float(p[0][1]) / img_h) for p in approx]
+                out.append((cls_index, normed))
+    return out
+
+
 def build_dataset_from_db(
     project_id: int,
     output_dir: str,
@@ -131,34 +241,22 @@ def build_dataset_from_db(
         )
 
         # 生成 YOLO polygon 标注文件
+        # 大缺陷常被用户分段涂抹（如硅片 V 型大缺口被拆成 N 个 polygon），
+        # 实例分割训练时模型会学到"分段"特征，推理时输出 N 个小框拼不回整体。
+        # 这里把同类相邻 polygon 合并成一个 instance：rasterize → morphological
+        # closing（kernel=20px 容差）→ findContours 重新拟合。
+        # kernel=20 在 4K 图上 ≈ 0.5mm，能合并标注断段又不至于误合两个独立缺陷。
+        img_w = image.width or 1
+        img_h = image.height or 1
+        merged = _merge_close_polygons_by_class(
+            annotations, class_map, img_w, img_h,
+            cluster_thresh=80, closing_kernel=100,
+        )
         lines = []
-        for ann in annotations:
-            cls_index = class_map.get(ann.class_id)
-            if cls_index is None:
-                continue
-
-            polygon = ann.polygon  # [{"x": 0.1, "y": 0.2}, ...] 或 [[39.0, 267.0], ...]
-            if len(polygon) < 3:
-                continue
-
-            # 兼容两种格式 + 自动归一化
-            img_w = image.width or 1
-            img_h = image.height or 1
-            parts = []
-            for p in polygon:
-                if isinstance(p, dict):
-                    px, py = p['x'], p['y']
-                else:
-                    px, py = p[0], p[1]
-                # 如果坐标 > 1，说明是像素坐标，需要归一化
-                if px > 1 or py > 1:
-                    px = px / img_w
-                    py = py / img_h
-                parts.append(f"{px:.6f} {py:.6f}")
+        for cls_index, poly in merged:
+            parts = [f"{px:.6f} {py:.6f}" for px, py in poly]
             coords = " ".join(parts)
             lines.append(f"{cls_index} {coords}")
-
-            # 统计
             stats["class_distribution"][cls_index] = \
                 stats["class_distribution"].get(cls_index, 0) + 1
             stats["total_annotations"] += 1

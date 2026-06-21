@@ -21,7 +21,7 @@
         <el-divider direction="vertical" />
         <div v-if="showBrushSize" class="brush-size-ctrl">
           <span class="ctrl-label">{{ currentTool==='eraser'?'橡皮':'画笔' }}</span>
-          <el-slider v-model="brushSize" :min="1" :max="100" :step="1" style="width:100px" />
+          <el-slider v-model="brushSize" :min="1" :max="500" :step="1" style="width:100px" />
           <span class="ctrl-value">{{ brushSize }}px</span>
         </div>
         <el-divider direction="vertical" />
