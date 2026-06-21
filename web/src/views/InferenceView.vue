@@ -14,8 +14,8 @@
         <el-select v-model="selModelIdx" placeholder="选择模型" style="width:240px" size="small">
           <el-option v-for="(m,i) in models" :key="i" :label="m.label" :value="i" />
         </el-select>
-        <el-select v-model="device" style="width:140px" size="small">
-          <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" :disabled="!d.available" />
+        <el-select v-model="device" style="width:280px" size="small">
+          <el-option v-for="d in devices" :key="`${d.backend||''}:${d.id}`" :label="d.name" :value="d.id" :disabled="!d.available" />
         </el-select>
         <span class="p-label">置信度</span>
         <el-input-number v-model="conf" :min="0.01" :max="0.99" :step="0.05" :precision="2" size="small" style="width:96px" />

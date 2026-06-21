@@ -133,17 +133,46 @@ def list_models(project_id: int = Query(default=0), db: Session = Depends(get_db
 
 @router.get("/devices")
 def list_devices():
-    """检测可用推断设备"""
-    devices = [{"id": "cpu", "name": "CPU", "available": True}]
+    """检测可用推断设备。
+    .pt 模型走 PyTorch CUDA / CPU；OV 模型走 OpenVINO 的 CPU / GPU.0 (核显) / GPU.1 (独显)。
+    返回所有可见设备，前端按模型类型自行过滤。
+    """
+    devices = [{"id": "cpu", "name": "CPU (PyTorch)", "available": True, "backend": "pytorch"}]
+
+    # PyTorch CUDA
     try:
         import torch
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
-                devices.append({"id": str(i), "name": f"NVIDIA {torch.cuda.get_device_name(i)}", "available": True})
+                devices.append({
+                    "id": str(i),
+                    "name": f"CUDA - {torch.cuda.get_device_name(i)}",
+                    "available": True,
+                    "backend": "pytorch",
+                })
         else:
-            devices.append({"id": "0", "name": "NVIDIA GPU (不可用)", "available": False})
-    except Exception:
-        devices.append({"id": "0", "name": "NVIDIA GPU (未安装)", "available": False})
+            print("[devices] torch.cuda.is_available()=False")
+    except Exception as e:
+        print(f"[devices] torch CUDA probe failed: {e}")
+
+    # OpenVINO 设备（CPU / GPU.0 / GPU.1 / NPU）
+    try:
+        import openvino as ov
+        core = ov.Core()
+        for d in core.available_devices:
+            try:
+                name = core.get_property(d, "FULL_DEVICE_NAME")
+            except Exception:
+                name = d
+            devices.append({
+                "id": d,                          # 推理时用 _format_device_for_backend 加 intel: 前缀
+                "name": f"OV {d} - {name}",
+                "available": True,
+                "backend": "openvino",
+            })
+    except Exception as e:
+        print(f"[devices] OpenVINO probe failed: {e}")
+
     return devices
 
 
@@ -819,6 +848,17 @@ def crop_defects_for_classifier(
         ext = fp.suffix.lower()
         if ext not in (".bmp", ".png", ".jpg", ".jpeg"):
             ext = ".png"
+
+        # DB 里 bbox 是【推理时缩放后】的坐标系（长边 = rec.resize_size）。
+        # 把图按当时的缩放参数也缩到推理尺寸，让 img 和 bbox 落在同一坐标系里再切。
+        # 想要高清小图就推理时不缩放（resize_size=0），分割本身在缩放图上做的，
+        # 小图反向放大到原图分辨率对下游分类没有信息增益。
+        if rec.resize_size and rec.resize_size > 0:
+            h, w = img.shape[:2]
+            long_side = max(h, w)
+            if long_side != rec.resize_size:
+                scale = rec.resize_size / long_side
+                img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
         for det in rec.detections:
             bbox = det.get("bbox")
