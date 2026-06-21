@@ -118,6 +118,9 @@ const selectedClassId = ref<number>(0)
 const selectedAnnIdx = ref(-1)
 const currentTool = ref('polygon')
 const brushSize = ref(2)
+// 切工具 / 切类别 / 切图 时重置 Shift 追加锚点——避免追加到不相关的旧标注
+watch(currentTool,()=>{lastBrushAnnIdx=-1;lastBrushPts=[]})
+watch(selectedClassId,()=>{lastBrushAnnIdx=-1;lastBrushPts=[]})
 const isDrawing = ref(false)
 const saving = ref(false)
 const saveState = ref<'idle'|'pending'|'saving'|'saved'|'error'>('idle')
@@ -142,7 +145,7 @@ const toolHint = computed(()=>{
   return({
     polygon:isDrawing.value?'点击加顶点·双击/回车完成·Esc取消':'点击开始画多边形',
     rect:'点击拖拽画矩形',
-    brush:'按住涂抹·松开生成标注',circle:'点击拖拽画圆',
+    brush:'按住涂抹·松开生成标注·按住 Shift 涂抹追加到上一段（大缺陷分多笔涂）',circle:'点击拖拽画圆',
     polyline:isDrawing.value?'点击加折点·双击/回车完成':'点击开始画折线',
     eraser:'按住涂抹擦除标注区域',boxEraser:'拖拽框选删除',select:'点击标注后可拖动顶点编辑·拖动绿色圆点旋转·Ctrl+C复制·Ctrl+V粘贴',
   })[currentTool.value]||''
@@ -152,6 +155,11 @@ let canvas:fabric.Canvas|null=null
 let drawingPoints:{x:number;y:number}[]=[]
 let brushPts:{x:number;y:number}[]=[]
 let isBrushing=false
+// Shift 追加：分多笔涂同一个缺陷时，按住 Shift 涂的笔迹会自动合并到上一段
+// 而非新建独立 annotation。lastBrushAnnIdx 跟踪上次 brush 落到 annotations
+// 数组的位置，lastBrushPts 累积笔迹点序列重新 rasterContour 拟合。
+let lastBrushAnnIdx=-1
+let lastBrushPts:{x:number;y:number}[]=[]
 let isErasing=false
 let eraserPts:{x:number;y:number}[]=[]
 let circleStart:{x:number;y:number}|null=null
@@ -443,7 +451,7 @@ function initCanvas(){
   canvas.on('mouse:up',(opt)=>{
     if(isPanning){isPanning=false;canvas!.setCursor('default');return}
     const p=canvas!.getPointer(opt.e)
-    if(currentTool.value==='brush'&&isBrushing)finishBrush()
+    if(currentTool.value==='brush'&&isBrushing)finishBrush(!!(opt.e as any).shiftKey)
     else if(currentTool.value==='eraser'&&isErasing)finishEraser()
     else if(currentTool.value==='circle'&&circleStart)finishCircle(p)
     else if(currentTool.value==='rect'&&rectStart)finishRect(p)
@@ -585,12 +593,36 @@ function finishPolygon(){
 }
 
 // ====== 涂抹 ======
-function finishBrush(){
+function finishBrush(append:boolean=false){
   isBrushing=false;cleanTmp()
   if(!currentImage.value||brushPts.length<2)return
   const W=dispW(),H=dispH()
+  // Shift 追加：拼接上次笔迹 + 本次笔迹，重新 rasterContour 拟合（rasterContour
+  // 会在两笔末尾与下一笔开头之间画连线，自动桥接两段）。仅当上次 brush
+  // annotation 仍在且同类时生效。
+  if(append&&lastBrushAnnIdx>=0&&lastBrushAnnIdx<annotations.value.length
+     &&annotations.value[lastBrushAnnIdx].class_id===selectedClassId.value
+     &&lastBrushPts.length>0){
+    const combined=[...lastBrushPts,...brushPts]
+    const poly=rasterContour(combined,brushSize.value,W,H)
+    if(poly.length>=3){
+      pushUndo()
+      annotations.value[lastBrushAnnIdx]={class_id:selectedClassId.value,polygon:sanitizePolygon(poly)}
+      lastBrushPts=combined
+      dirty.value=true
+      renderAnnotations()
+      scheduleAutoSave()
+      brushPts=[]
+      return
+    }
+  }
   const poly=rasterContour(brushPts,brushSize.value,W,H)
-  if(poly.length>=3)addAnn(poly)
+  if(poly.length>=3){
+    addAnn(poly)
+    lastBrushAnnIdx=annotations.value.length-1
+    lastBrushPts=[...brushPts]
+  }
+  brushPts=[]
 }
 
 // ====== 折线 ======
@@ -740,7 +772,7 @@ function drawTmpLine(p:{x:number;y:number}){
   const ln=new fabric.Line([last.x,last.y,p.x,p.y],{stroke:c,strokeWidth:0.75,strokeDashArray:[5,3],selectable:false,evented:false})
   ;(ln as any)._tmp=true;(ln as any)._tl=true;canvas.add(ln);canvas.requestRenderAll()
 }
-function cancelDrawing(){isDrawing.value=false;drawingPoints=[];isBrushing=false;brushPts=[];isErasing=false;eraserPts=[];circleStart=null;rectStart=null;boxEraserStart=null;cleanTmp()}
+function cancelDrawing(){isDrawing.value=false;drawingPoints=[];isBrushing=false;brushPts=[];isErasing=false;eraserPts=[];circleStart=null;rectStart=null;boxEraserStart=null;lastBrushAnnIdx=-1;lastBrushPts=[];cleanTmp()}
 function cleanTmp(){if(!canvas)return;canvas.getObjects().filter(o=>(o as any)._tmp).forEach(o=>canvas!.remove(o));canvas.requestRenderAll()}
 function selectAnn(idx:number){
   selectedAnnIdx.value=idx
@@ -1005,6 +1037,7 @@ async function switchImage(id:number){
     }
   }
   removeVertexHandles();selectedAnnIdx.value=-1
+  lastBrushAnnIdx=-1;lastBrushPts=[]
   currentImageId.value=id;await loadImageAndAnnotations()
 }
 function prevImage(){if(hasPrev.value)switchImage(imageList.value[currentImageIdx.value-1].id)}
