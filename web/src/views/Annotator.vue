@@ -249,18 +249,42 @@ function rasterContour(points:{x:number;y:number}[],lw:number,W:number,H:number)
 }
 
 function scanContour(ctx:CanvasRenderingContext2D,cw:number,ch:number,ox:number,oy:number,W:number,H:number):Point[]{
-  const d=ctx.getImageData(0,0,cw,ch).data
-  const left:{x:number;y:number}[]=[],right:{x:number;y:number}[]=[]
-  const step=Math.max(1,Math.floor(ch/200))
-  for(let y=0;y<ch;y+=step){
-    let lx=-1,rx=-1
-    for(let x=0;x<cw;x++){if(d[(y*cw+x)*4]>128){if(lx===-1)lx=x;rx=x}}
-    if(lx!==-1){left.push({x:(lx+ox)/W,y:(y+oy)/H});right.push({x:(rx+ox)/W,y:(y+oy)/H})}
+  // Moore-Neighbor 边界追踪：沿真实轮廓 8 邻接行走，正确处理 U/S/L/C 形涂抹
+  // 旧扫描线算法假设每行白像素连续，会把 S 形等的内凹"水平凸包化"，产生填实 bug
+  const img=ctx.getImageData(0,0,cw,ch).data
+  const m=new Uint8Array(cw*ch)
+  for(let i=0;i<cw*ch;i++)if(img[i*4]>128)m[i]=1
+  // 起点：row-major 第一个白点（其 N/NW/NE/W 方向必为黑，可直接从 NE 开始顺时针扫）
+  let sx=-1,sy=-1
+  for(let y=0;y<ch&&sx<0;y++)for(let x=0;x<cw;x++)if(m[y*cw+x]){sx=x;sy=y;break}
+  if(sx<0)return[]
+  // 方向编号：0:E 1:SE 2:S 3:SW 4:W 5:NW 6:N 7:NE
+  const dxs=[1,1,0,-1,-1,-1,0,1],dys=[0,1,1,1,0,-1,-1,-1]
+  const path:{x:number;y:number}[]=[{x:sx,y:sy}]
+  let cx=sx,cy=sy,prev=6  // 起点 N 邻居为黑（row-major 第一个白点），从 prev+1=NE 开始查
+  const maxIter=cw*ch*4
+  for(let it=0;it<maxIter;it++){
+    let nd=-1
+    for(let i=1;i<=8;i++){
+      const d_=(prev+i)%8
+      const nx=cx+dxs[d_],ny=cy+dys[d_]
+      if(nx<0||nx>=cw||ny<0||ny>=ch)continue
+      if(m[ny*cw+nx]){nd=d_;cx=nx;cy=ny;break}
+    }
+    if(nd<0)break  // 孤立像素
+    if(cx===sx&&cy===sy)break  // 回到起点
+    path.push({x:cx,y:cy})
+    prev=(nd+4)%8  // 新的"上一个黑邻居"位于来时方向的反方向
   }
-  if(left.length<2)return[]
-  const poly=[...left,...right.reverse()]
-  if(poly.length>120){const s=Math.ceil(poly.length/120);return poly.filter((_,i)=>i%s===0)}
-  return poly
+  if(path.length<3)return[]
+  // 等距抽稀到 ≤120 点（一像素一点会爆）
+  let pts=path
+  if(path.length>120){
+    const stp=path.length/120
+    pts=[]
+    for(let i=0;i<120;i++)pts.push(path[Math.floor(i*stp)])
+  }
+  return pts.map(p=>({x:(p.x+ox)/W,y:(p.y+oy)/H}))
 }
 
 // ================================================================
