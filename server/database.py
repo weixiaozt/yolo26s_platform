@@ -91,6 +91,12 @@ def init_db():
             "COMMENT '上次训练参数缓存（用户保存为默认）'",
             "projects.last_train_config",
         ),
+        # OV/ONNX 导出加内嵌 NMS 选项
+        (
+            "ALTER TABLE exported_models ADD COLUMN nms TINYINT NOT NULL DEFAULT 0 "
+            "COMMENT '0=裸输出, 1=内嵌 NMS（输出 1×300×6+nm，部署方无需自己 NMS）'",
+            "exported_models.nms",
+        ),
     ]
     # MySQL 在字段/索引/约束已存在时分别报这些错；其它异常视为真正失败要打印出来。
     _ALREADY_EXISTS_TOKENS = ("Duplicate column", "Duplicate key", "Duplicate", "already exists", "errno: 121", "1060", "1061", "1826")

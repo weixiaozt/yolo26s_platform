@@ -31,6 +31,7 @@ class ExportRequest(BaseModel):
     imgsz: int = Field(default=640, ge=64, le=1280)   # 分类项目用 224，下限放宽到 64
     half: bool = Field(default=False)                    # FP16
     int8: bool = Field(default=False)                    # INT8 量化（仅 OpenVINO）
+    nms: bool = Field(default=False)                     # 内嵌 NMS 节点（仅 onnx/openvino + det/seg/obb）
 
 
 @router.get("/list")
@@ -55,6 +56,7 @@ def list_exports(task_id: int = 0, project_id: int = 0, db: Session = Depends(ge
             "half": e.half == 1,
             "int8": e.half == 2,
             "precision": {0: "FP32", 1: "FP16", 2: "INT8"}.get(e.half, "FP32"),
+            "nms": bool(e.nms),
             "status": e.status,
             "error_message": e.error_message,
             "created_at": e.created_at.isoformat() if e.created_at else None,
@@ -138,17 +140,18 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
     # half 字段是 3 态精度码：0=FP32 / 1=FP16 / 2=INT8
     precision_code = 2 if req.int8 else (1 if req.half else 0)
 
-    # 检查是否已有相同导出（含精度，否则 INT8 会被同 task 的 FP16 误判为已存在）
+    # 检查是否已有相同导出（含精度 + nms，避免同 task 不同 nms 选项被误判已存在）
     existing = db.query(ExportedModel).filter(
         ExportedModel.task_id == req.task_id,
         ExportedModel.source_type == req.source_type,
         ExportedModel.export_format == req.export_format,
         ExportedModel.imgsz == req.imgsz,
         ExportedModel.half == precision_code,
+        ExportedModel.nms == (1 if req.nms else 0),
         ExportedModel.status == "completed",
     ).first()
     if existing:
-        raise HTTPException(status_code=409, detail="该格式与精度组合已导出，无需重复导出")
+        raise HTTPException(status_code=409, detail="该组合（格式/精度/NMS）已导出，无需重复导出")
 
     # 创建记录（half: 0=FP32, 1=FP16, 2=INT8）
     record = ExportedModel(
@@ -158,6 +161,7 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
         export_format=req.export_format,
         imgsz=req.imgsz,
         half=precision_code,
+        nms=1 if req.nms else 0,
         status="exporting",
     )
     db.add(record)
@@ -174,14 +178,14 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
             dataset_path = str(Path(task.output_dir) / "dataset")
     threading.Thread(
         target=_do_export,
-        args=(export_id, src_path, req.export_format, req.imgsz, req.half, req.int8, dataset_path),
+        args=(export_id, src_path, req.export_format, req.imgsz, req.half, req.int8, req.nms, dataset_path),
         daemon=True,
     ).start()
 
     return {"id": export_id, "status": "exporting", "message": "导出任务已启动"}
 
 
-def _do_export(export_id: int, src_path: str, fmt: str, imgsz: int, half: bool, int8: bool = False, dataset_path: str = None):
+def _do_export(export_id: int, src_path: str, fmt: str, imgsz: int, half: bool, int8: bool = False, nms: bool = False, dataset_path: str = None):
     """后台执行导出"""
     db = SessionLocal()
     try:
@@ -198,6 +202,7 @@ def _do_export(export_id: int, src_path: str, fmt: str, imgsz: int, half: bool, 
             imgsz=imgsz,
             half=half,
             int8=int8,
+            nms=nms,
             dataset_path=dataset_path,
         )
 
@@ -300,15 +305,24 @@ def download_exported_model(export_id: int, db: Session = Depends(get_db)):
         return FileResponse(str(ep), media_type="application/octet-stream", filename=filename)
     elif ep.is_dir():
         # 目录：OpenVINO → 打 zip
-        zip_name = f"{tname}_{record.source_type}_{record.export_format}"
+        # zip 命名带 record.id，避免同 task + 同格式但不同 nms/精度的多条记录共享缓存
+        nms_tag = "_nms" if record.nms else ""
+        zip_name = f"{tname}_{record.source_type}_{record.export_format}{nms_tag}"
+        zip_cache_name = f"{zip_name}_id{record.id}"
         tmp_dir = Path(tempfile.gettempdir()) / "model_downloads"
         tmp_dir.mkdir(exist_ok=True)
-        zip_path = tmp_dir / f"{zip_name}.zip"
+        zip_path = tmp_dir / f"{zip_cache_name}.zip"
 
-        # 如果 zip 已存在且较新，直接用缓存
-        if not zip_path.exists() or zip_path.stat().st_mtime < ep.stat().st_mtime:
+        # Windows 目录 mtime 在 ultralytics 覆盖式导出后不会更新，必须递归找最大文件 mtime
+        if ep.is_dir():
+            ep_mtime = max((f.stat().st_mtime for f in ep.rglob("*") if f.is_file()), default=0)
+        else:
+            ep_mtime = ep.stat().st_mtime
+
+        if not zip_path.exists() or zip_path.stat().st_mtime < ep_mtime:
             shutil.make_archive(str(zip_path.with_suffix("")), "zip", str(ep.parent), ep.name)
 
+        # 用户看到的下载文件名仍按 zip_name（不带 id 后缀，对用户透明）
         return FileResponse(str(zip_path), media_type="application/zip", filename=f"{zip_name}.zip")
     else:
         raise HTTPException(status_code=404, detail="导出路径无效")

@@ -81,6 +81,12 @@
             需安装 nncf: <code>pip install nncf</code>，导出时间较长（2~5 分钟）。
           </div>
         </el-alert>
+        <el-form-item v-if="!isClsTask && exportFormat !== 'tensorrt'" label="内嵌 NMS">
+          <el-switch v-model="nms" />
+          <span style="font-size:12px;color:#909399;margin-left:8px">
+            开启后输出 <code>(1,300,6+nm)</code> 已过滤好的 box，部署方无需自己写 NMS（推理 +3~8ms/张）
+          </span>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="exporting" @click="startExport" :disabled="!selTaskId">
             <el-icon><Upload /></el-icon> 开始转换
@@ -149,6 +155,12 @@
         <el-table-column label="精度" width="70">
           <template #default="{row}">{{ row.precision || 'FP32' }}</template>
         </el-table-column>
+        <el-table-column label="NMS" width="70">
+          <template #default="{row}">
+            <el-tag v-if="row.nms" type="success" size="small">内嵌</el-tag>
+            <span v-else style="color:#aaa;font-size:12px">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="导出路径" min-width="200">
           <template #default="{row}">
             <span v-if="row.export_path" style="font-size:11px;color:#606266;word-break:break-all">{{ row.export_path }}</span>
@@ -199,7 +211,7 @@ interface TaskInfo {
   finished_at:string|null
   created_at:string|null
 }
-interface ExportInfo { id:number; task_id:number; source_type:string; export_format:string; export_path:string|null; file_size_mb:number; imgsz:number; half:boolean; status:string; error_message:string|null; created_at:string|null }
+interface ExportInfo { id:number; task_id:number; source_type:string; export_format:string; export_path:string|null; file_size_mb:number; imgsz:number; half:boolean; precision:string; nms:boolean; status:string; error_message:string|null; created_at:string|null }
 
 const tasks = ref<TaskInfo[]>([])
 const exports = ref<ExportInfo[]>([])
@@ -208,6 +220,7 @@ const sourceType = ref('best')
 const exportFormat = ref('onnx')
 const imgsz = ref(640)
 const precision = ref('fp32')
+const nms = ref(false)
 const exporting = ref(false)
 let pollTimer: any = null
 
@@ -292,6 +305,7 @@ async function startExport() {
       imgsz: imgsz.value,
       half: precision.value === 'fp16',
       int8: precision.value === 'int8',
+      nms: nms.value,
     })
     ElMessage.success('转换任务已启动！')
     await loadExports()

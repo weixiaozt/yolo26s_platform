@@ -36,6 +36,7 @@ def run_export(
     imgsz: int = 640,
     half: bool = False,
     int8: bool = False,
+    nms: bool = False,
     simplify: bool = True,
     device: str = None,
     dataset_path: str = None,
@@ -90,23 +91,21 @@ def run_export(
 
     try:
         # 分割模型导出时 simplify 可能导致问题，提供备选方案
+        onnx_kwargs = {"format": "onnx", "imgsz": imgsz, "simplify": simplify, "half": False}
+        if nms:
+            onnx_kwargs["nms"] = True
+            # 内嵌 NMS 默认 conf=0.25 会硬过滤 < 0.25 的检测，导致运行时低 conf 阈值不生效。
+            # 降到 0.001 让外部 conf 阈值（如 ultralytics predict(conf=0.15)）正常生效。
+            # 部署端如果直接读 raw output，自行按 det[4] (conf) 过滤即可。
+            onnx_kwargs["conf"] = 0.001
         try:
-            onnx_path = model.export(
-                format="onnx",
-                imgsz=imgsz,
-                simplify=simplify,
-                half=False,  # ONNX 通常用 FP32
-            )
+            onnx_path = model.export(**onnx_kwargs)
         except Exception as simplify_error:
             if simplify and "simplify" in str(simplify_error).lower():
                 if progress_callback:
                     progress_callback(2, 4, "ONNX slimming 失败，尝试不简化...")
-                onnx_path = model.export(
-                    format="onnx",
-                    imgsz=imgsz,
-                    simplify=False,  # 禁用简化
-                    half=False,
-                )
+                onnx_kwargs["simplify"] = False
+                onnx_path = model.export(**onnx_kwargs)
             else:
                 raise
         results["onnx_path"] = str(onnx_path)
@@ -191,6 +190,13 @@ def run_export(
                     "imgsz": imgsz,
                     "half": half,
                 }
+
+            # nms=True：在 OV 模型里内嵌 NMS 节点，输出从 (1,4+nc+nm,N) 变成 (1,300,6+nm)
+            # 即 [x1,y1,x2,y2,conf,cls,mask_coeff*nm]，部署方无需自己写 NMS。
+            # conf=0.001 把内嵌阈值降到极低，让外部 conf 阈值生效（同 ONNX 上面的注释）。
+            if nms:
+                export_kwargs["nms"] = True
+                export_kwargs["conf"] = 0.001
 
             ov_path = model2.export(**export_kwargs)
             results["export_path"] = str(ov_path)

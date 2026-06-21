@@ -16,7 +16,8 @@ class ExportedModel(Base):
     onnx_path = Column(String(500))                          # 中间 ONNX 路径
     file_size_mb = Column(Float, default=0)                  # 文件大小 MB
     imgsz = Column(Integer, default=640)
-    half = Column(Integer, default=0)                        # 0=FP32, 1=FP16
+    half = Column(Integer, default=0)                        # 0=FP32, 1=FP16, 2=INT8
+    nms = Column(Integer, default=0)                         # 0=不带 NMS, 1=内嵌 NMS（输出 1×300×6+nm）
     status = Column(String(20), default="pending")           # pending/exporting/completed/failed
     error_message = Column(String(2000))
     created_at = Column(DateTime, server_default=func.now())
