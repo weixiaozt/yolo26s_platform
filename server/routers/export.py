@@ -114,6 +114,7 @@ def list_exportable_tasks(project_id: int = 0, db: Session = Depends(get_db)):
             "current_epoch": t.current_epoch,
             "epochs": t.epochs,
             "imgsz": cfg_imgsz,
+            "model_name": cfg.get("model_name") if isinstance(cfg, dict) else None,
             "models": models,
             "finished_at": t.finished_at.isoformat() if t.finished_at else None,
             "created_at": t.created_at.isoformat() if t.created_at else None,

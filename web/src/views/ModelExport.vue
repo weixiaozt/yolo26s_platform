@@ -82,8 +82,11 @@
           </div>
         </el-alert>
         <el-form-item v-if="!isClsTask && exportFormat !== 'tensorrt'" label="内嵌 NMS">
-          <el-switch v-model="nms" />
-          <span style="font-size:12px;color:#909399;margin-left:8px">
+          <el-switch v-model="nms" :disabled="isEnd2endModel" />
+          <span v-if="isEnd2endModel" style="font-size:12px;color:#E6A23C;margin-left:8px">
+            YOLO26/10 架构自带 NMS，无需此选项（输出已是 <code>(1,300,6+nm)</code>）
+          </span>
+          <span v-else style="font-size:12px;color:#909399;margin-left:8px">
             开启后输出 <code>(1,300,6+nm)</code> 已过滤好的 box，部署方无需自己写 NMS（推理 +3~8ms/张）
           </span>
         </el-form-item>
@@ -207,6 +210,7 @@ interface TaskInfo {
   current_epoch:number
   epochs:number
   imgsz:number
+  model_name:string|null
   models:{type:string;path:string}[]
   finished_at:string|null
   created_at:string|null
@@ -276,12 +280,22 @@ function onTaskChange() {
   sourceType.value = 'best'
   const t = tasks.value.find(x => x.task_id === selTaskId.value)
   if (t && t.imgsz) imgsz.value = t.imgsz
+  // 切到 end2end 模型时 nms 强制关掉（避免上次选 YOLO11 时打开了的状态残留）
+  const name = (t?.model_name || '').toLowerCase()
+  if (name.includes('yolo26') || name.includes('yolo10')) nms.value = false
 }
 
 // 当前选中任务是否为分类项目（用于隐藏输入尺寸选项）
 const isClsTask = computed(() => {
   const t = tasks.value.find(x => x.task_id === selTaskId.value)
   return t?.task_type === 'cls'
+})
+
+// 当前选中任务是否 end2end 架构模型（YOLO26/10 head 自带 NMS，"内嵌 NMS" 开关无意义）
+const isEnd2endModel = computed(() => {
+  const t = tasks.value.find(x => x.task_id === selTaskId.value)
+  const name = (t?.model_name || '').toLowerCase()
+  return name.includes('yolo26') || name.includes('yolo10')
 })
 
 function taskStatusType(s: string) {

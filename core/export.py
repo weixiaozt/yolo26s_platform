@@ -78,6 +78,17 @@ def run_export(
         progress_callback(1, 4, "加载模型...")
     model = YOLO(str(model_path))
 
+    # YOLO26/10 等 end2end 架构模型 head 自带 NMS，外加 nms=True/conf=0.001 无效
+    # 甚至 conf=0.001 可能被 end2end head 内部 top-K 用掉造成混乱。强制忽略 nms 选项。
+    is_end2end = False
+    try:
+        is_end2end = bool(getattr(model.model.model[-1], 'end2end', False))
+    except Exception:
+        pass
+    if nms and is_end2end:
+        print("[export] end2end 模型（YOLO26/10）自带 NMS，忽略 nms/conf 参数")
+        nms = False
+
     results = {
         "format": export_format,
         "imgsz": imgsz,
