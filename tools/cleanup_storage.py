@@ -5,11 +5,12 @@
 1. storage/runs/inference/ 累积的推理缓存 PNG（同步清空 InferenceResult 表）
 2. 每个 task_*/runs/train/weights/epoch*.pt（保留 best.pt + last.pt）
 3. 每个 task_*/{raw, cropped, resized}（训练前预处理产物，训练完无用）
+4. 已结束任务的 task_*/dataset/（YOLO 数据集，训练完无用；继承训练会重新生成）
+   排除 status=training/preparing/pending/exporting 的活跃任务
 
 保留：
 - best.pt / last.pt / results.csv / plots / args.yaml
-- dataset/ （YOLO 数据集，万一要复现）
-- storage/uploads/ （所有原图）
+- storage/uploads/ （所有原图，原始来源永远不动）
 - venv
 
 用法：
@@ -80,6 +81,35 @@ def collect_targets():
         if preproc_dirs:
             total = sum(dir_size(p) for p in preproc_dirs)
             groups.append((f"训练前预处理产物 ({len(preproc_dirs)} 个目录)", preproc_dirs, total))
+
+    # 4. 训练结束任务的 dataset/（YOLO 数据集，训练完无用；继承训练时会重新生成）
+    # 排除 status 为 training/preparing/pending 的任务（正在用中）
+    if runs_dir.exists():
+        from server.database import SessionLocal
+        from server.models.train_task import TrainTask
+        db = SessionLocal()
+        try:
+            busy_ids = {t.id for t in db.query(TrainTask).filter(
+                TrainTask.status.in_(("training", "preparing", "pending", "exporting"))
+            ).all()}
+        finally:
+            db.close()
+        dataset_dirs = []
+        for task_dir in sorted(runs_dir.iterdir()):
+            if not task_dir.is_dir() or not task_dir.name.startswith("task_"):
+                continue
+            try:
+                tid = int(task_dir.name.split("_")[1])
+            except (ValueError, IndexError):
+                continue
+            if tid in busy_ids:
+                continue
+            ds = task_dir / "dataset"
+            if ds.exists() and ds.is_dir():
+                dataset_dirs.append(ds)
+        if dataset_dirs:
+            total = sum(dir_size(p) for p in dataset_dirs)
+            groups.append((f"已结束任务的 dataset/ ({len(dataset_dirs)} 个)", dataset_dirs, total))
 
     return groups
 

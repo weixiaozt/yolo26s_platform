@@ -16,10 +16,24 @@
         → 输出可直接用于 core/train 的完整数据集
 """
 
+import os
 import sys
 import shutil
 from pathlib import Path
 from typing import Optional
+
+
+def _link_or_copy(src, dst):
+    """优先用硬链接（同盘 NTFS 0 字节，多 task 共享 inode），失败 fallback 到复制。
+    安全前提：原始图永远只读不改（项目里 storage/uploads 就是这样）。
+    删除某个引用不会影响其他引用，引用计数到 0 才真正释放磁盘块。"""
+    src, dst = str(src), str(dst)
+    if os.path.exists(dst):
+        os.remove(dst)
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copyfile(src, dst)  # 不用 copy2，避免下面 replace_all 误改
 
 # 确保项目根目录在 sys.path 中，以便导入 core/ 模块
 _project_root = str(Path(__file__).parent.parent.parent)
@@ -231,7 +245,7 @@ def build_dataset_from_db(
         # 用 image.id 作为文件名，避免重名
         stem = f"{image.id:06d}"
         dst_img = img_out / f"{stem}.png"
-        shutil.copy2(str(src_path), str(dst_img))
+        _link_or_copy(str(src_path), str(dst_img))
 
         # 查询该图像的所有标注
         annotations = (
@@ -354,7 +368,7 @@ def build_detection_dataset_from_db(
         if ext not in {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}:
             ext = '.png'
         dst_img = img_out / f"{stem}{ext}"
-        shutil.copy2(str(src_path), str(dst_img))
+        _link_or_copy(str(src_path), str(dst_img))
 
         # 读取标注
         annotations = (
@@ -497,11 +511,11 @@ def prepare_detection_dataset(
         else:
             val_count += 1
         # 复制图
-        shutil.copy2(str(img_path), str(dataset_dir / "images" / split / img_path.name))
+        _link_or_copy(str(img_path), str(dataset_dir / "images" / split / img_path.name))
         # 复制 label（同名 .txt）
         lbl_src = raw_path / "labels" / f"{img_path.stem}.txt"
         if lbl_src.exists():
-            shutil.copy2(str(lbl_src), str(dataset_dir / "labels" / split / f"{img_path.stem}.txt"))
+            _link_or_copy(str(lbl_src), str(dataset_dir / "labels" / split / f"{img_path.stem}.txt"))
         else:
             # 缺标注，写空文件（背景）
             (dataset_dir / "labels" / split / f"{img_path.stem}.txt").touch()
@@ -581,7 +595,7 @@ def build_obb_dataset_from_db(
         if ext not in {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}:
             ext = '.png'
         dst_img = img_out / f"{stem}{ext}"
-        shutil.copy2(str(src_path), str(dst_img))
+        _link_or_copy(str(src_path), str(dst_img))
 
         annotations = (
             db.query(Annotation).filter(Annotation.image_id == image.id).all()
@@ -698,10 +712,10 @@ def prepare_obb_dataset(
             train_count += 1
         else:
             val_count += 1
-        shutil.copy2(str(img_path), str(dataset_dir / "images" / split / img_path.name))
+        _link_or_copy(str(img_path), str(dataset_dir / "images" / split / img_path.name))
         lbl_src = raw_path / "labels" / f"{img_path.stem}.txt"
         if lbl_src.exists():
-            shutil.copy2(str(lbl_src), str(dataset_dir / "labels" / split / f"{img_path.stem}.txt"))
+            _link_or_copy(str(lbl_src), str(dataset_dir / "labels" / split / f"{img_path.stem}.txt"))
         else:
             (dataset_dir / "labels" / split / f"{img_path.stem}.txt").touch()
 
@@ -811,7 +825,7 @@ def prepare_classification_dataset(
                 if ext not in {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}:
                     ext = '.png'
                 dst = dataset_dir / split / cls_name / f"{img.id:08d}{ext}"
-                shutil.copy2(str(fp), str(dst))
+                _link_or_copy(str(fp), str(dst))
                 if split == "train":
                     train_count += 1
                 else:
@@ -951,7 +965,6 @@ def prepare_full_dataset(
     # 但用户显式标记为 OK 的图像必须全部参与训练
     ok_stems = export_stats.get("ok_stems", [])
     if ok_stems:
-        import shutil as _shutil
         ds_path = Path(dataset_dir)
         cropped_path = Path(cropped_dir)
         ok_added = 0
@@ -961,11 +974,11 @@ def prepare_full_dataset(
                 dst_img = ds_path / "images" / "train" / img_file.name
                 dst_lbl = ds_path / "labels" / "train" / f"{img_file.stem}.txt"
                 if not dst_img.exists():
-                    _shutil.copy2(str(img_file), str(dst_img))
+                    _link_or_copy(str(img_file), str(dst_img))
                     # 空标注文件（负样本）
                     lbl_src = cropped_path / "labels" / f"{img_file.stem}.txt"
                     if lbl_src.exists():
-                        _shutil.copy2(str(lbl_src), str(dst_lbl))
+                        _link_or_copy(str(lbl_src), str(dst_lbl))
                     else:
                         dst_lbl.touch()
                     ok_added += 1
