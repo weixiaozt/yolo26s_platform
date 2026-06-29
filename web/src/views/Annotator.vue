@@ -22,7 +22,8 @@
         <div v-if="showBrushSize" class="brush-size-ctrl">
           <span class="ctrl-label">{{ currentTool==='eraser'?'橡皮':'画笔' }}</span>
           <el-slider v-model="brushSize" :min="1" :max="500" :step="1" style="width:100px" />
-          <span class="ctrl-value">{{ brushSize }}px</span>
+          <el-input-number v-model="brushSize" :min="1" :max="500" :step="1" :controls="false" size="small" style="width:64px" />
+          <span class="ctrl-value">px</span>
         </div>
         <el-divider direction="vertical" />
         <el-button size="small" :disabled="!canUndo" @click="undo">撤销</el-button>
