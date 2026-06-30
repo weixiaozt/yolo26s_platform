@@ -3,17 +3,17 @@
     <!-- 页头 -->
     <div class="page-header">
       <h1>项目管理</h1>
-      <div style="display:flex;gap:10px">
-        <el-button type="primary" @click="showCreateDialog = true">
+      <div class="btn-group">
+        <el-button class="hbtn hbtn--blue" @click="showCreateDialog = true">
           <el-icon><Plus /></el-icon>
           新建项目
         </el-button>
-        <el-button @click="router.push('/import')">
+        <el-button class="hbtn hbtn--green" @click="router.push('/import')">
           <el-icon><Upload /></el-icon>
           导入项目
         </el-button>
         <el-upload :auto-upload="false" :show-file-list="false" accept=".zip" :on-change="onPackageFileChange">
-          <el-button :loading="importing">
+          <el-button class="hbtn hbtn--orange" :loading="importing">
             <el-icon><FolderOpened /></el-icon>
             导入项目包
           </el-button>
@@ -103,7 +103,7 @@
           <el-input v-model="form.name" placeholder="如：硅片裂纹检测-批次A" />
         </el-form-item>
         <el-form-item label="任务类型" required>
-          <el-radio-group v-model="form.task_type">
+          <el-radio-group v-model="form.task_type" class="radio-cards">
             <el-radio-button label="seg">实例分割（Seg）</el-radio-button>
             <el-radio-button label="det">目标检测（Det）</el-radio-button>
             <el-radio-button label="obb">旋转检测（OBB）</el-radio-button>
@@ -155,25 +155,27 @@
           style="margin-bottom:18px" />
 
         <el-divider content-position="left">缺陷类别</el-divider>
-        <div v-for="(cls, idx) in form.class_names" :key="idx" class="class-row">
-          <el-input v-model="cls.name" placeholder="类别名" style="width: 160px" />
-          <el-color-picker v-model="cls.color" size="small" />
-          <el-button
-            v-if="form.class_names.length > 1"
-            type="danger" text size="small"
-            @click="form.class_names.splice(idx, 1)"
-          >
-            删除
-          </el-button>
+        <div class="class-list">
+          <div v-for="(cls, idx) in form.class_names" :key="idx" class="class-row">
+            <el-input v-model="cls.name" placeholder="类别名" class="class-name-input" />
+            <el-color-picker v-model="cls.color" />
+            <el-button
+              v-if="form.class_names.length > 1"
+              class="hbtn hbtn--red class-del" size="small" title="删除该类别"
+              @click="form.class_names.splice(idx, 1)"
+            >
+              <el-icon><Delete /></el-icon>
+            </el-button>
+          </div>
         </div>
-        <el-button type="primary" text @click="addClass" style="margin-top: 8px">
-          + 添加类别
+        <el-button class="hbtn hbtn--blue" size="small" @click="addClass" style="margin-top: 2px">
+          <el-icon><Plus /></el-icon> 添加类别
         </el-button>
       </el-form>
 
       <template #footer>
         <el-button @click="showCreateDialog = false">取消</el-button>
-        <el-button type="primary" :loading="creating" @click="handleCreate">创建</el-button>
+        <el-button class="hbtn hbtn--blue" :loading="creating" @click="handleCreate">创建</el-button>
       </template>
     </el-dialog>
   </div>
@@ -437,11 +439,22 @@ onMounted(loadProjects)
   font-size: 12px;
   color: #c0c4cc;
 }
+.class-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
 .class-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
+  gap: 8px;
+  padding: 5px 10px;
+  background: #f6f8fb;
+  border: 1px solid #eceff5;
+  border-radius: 8px;
 }
+.class-name-input { flex: 1; }
+.class-del { padding: 0 10px; }
 .hint { font-size: 12px; color: #909399; }
 </style>

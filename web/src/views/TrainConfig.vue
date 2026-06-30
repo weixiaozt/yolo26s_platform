@@ -5,17 +5,25 @@
         <el-button text @click="router.push(`/project/${id}`)"><el-icon><ArrowLeft /></el-icon> 返回</el-button>
         <h1>训练配置</h1>
       </div>
-      <div style="display:flex;gap:10px">
-        <el-button @click="router.push(`/project/${id}/train/monitor`)">
-          查看训练监控
+      <div class="btn-group">
+        <el-button class="hbtn hbtn--cyan" @click="router.push(`/project/${id}/train/monitor`)">
+          <el-icon><Odometer /></el-icon> 查看训练监控
         </el-button>
-        <el-button @click="restoreDefaults">
+        <el-button class="hbtn hbtn--gray" @click="restoreDefaults">
           <el-icon><RefreshLeft /></el-icon> 恢复默认值
         </el-button>
-        <el-button type="success" @click="saveAsDefault" :loading="savingDefaults">
+        <el-upload :auto-upload="false" :show-file-list="false" accept=".json" :on-change="importParamsJson">
+          <el-button class="hbtn hbtn--violet">
+            <el-icon><Upload /></el-icon> 导入参数
+          </el-button>
+        </el-upload>
+        <el-button class="hbtn hbtn--teal" @click="exportParamsJson">
+          <el-icon><Download /></el-icon> 导出参数
+        </el-button>
+        <el-button class="hbtn hbtn--green" @click="saveAsDefault" :loading="savingDefaults">
           <el-icon><Document /></el-icon> 保存为默认
         </el-button>
-        <el-button type="primary" size="large" @click="startTrain" :loading="submitting">
+        <el-button class="hbtn hbtn--blue" @click="startTrain" :loading="submitting">
           <el-icon><VideoPlay /></el-icon> 提交训练任务
         </el-button>
       </div>
@@ -459,6 +467,50 @@ async function restoreDefaults() {
   } catch { return }
   Object.assign(c.value, defaultsForTaskType(taskType.value))
   ElMessage.success('已恢复内置默认值')
+}
+
+// ---- 导入 / 导出 训练参数 JSON ----
+// 不随导入覆盖的字段：当次特殊 + 项目级（与 applyResumeTask 一致，避免污染当前项目设置）
+const NON_PORTABLE_KEYS = ['train_mode', 'resume_from_task_id', 'resume_model_type',
+  'class_names', 'task_type', 'resize_h', 'resize_w', 'crop_size', 'overlap']
+
+function exportParamsJson() {
+  const blob = new Blob([JSON.stringify(c.value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  const safe = (taskName.value || 'train-params').replace(/[\\/:*?"<>|\s]+/g, '_')
+  a.download = `train-params-${safe}.json`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  ElMessage.success('训练参数已导出为 JSON 文件')
+}
+
+async function importParamsJson(file: any) {
+  try {
+    const raw = file?.raw || file
+    const text = await raw.text()
+    const parsed = JSON.parse(text)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      ElMessage.error('该 JSON 不是有效的训练参数对象')
+      return
+    }
+    const cleaned: Record<string, any> = {}
+    let skipped = 0
+    for (const [k, v] of Object.entries(parsed)) {
+      if (NON_PORTABLE_KEYS.includes(k)) { skipped++; continue }
+      cleaned[k] = v
+    }
+    const n = Object.keys(cleaned).length
+    if (n === 0) { ElMessage.warning('JSON 里没有可导入的训练参数'); return }
+    Object.assign(c.value, cleaned)
+    const note = skipped > 0 ? `（跳过 ${skipped} 个项目级/特殊字段）` : ''
+    ElMessage.success(`已导入 ${n} 个训练参数${note}`)
+  } catch {
+    ElMessage.error('导入失败：文件不是合法 JSON')
+  }
 }
 
 async function startTrain() {

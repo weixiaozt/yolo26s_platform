@@ -3,7 +3,7 @@
     <!-- 侧边栏（登录页和标注页不显示） -->
     <el-aside v-if="showSidebar" width="220px" class="app-aside">
       <div class="logo">
-        <h2>YOLO26s-Seg</h2>
+        <h2>VP_vision</h2>
         <span>缺陷标注平台</span>
       </div>
       <el-menu
@@ -99,9 +99,26 @@ async function changePassword() {
 <style scoped>
 .app-container { height:100vh; }
 .app-aside { background:#1d1e1f; border-right:1px solid #333; overflow-y:auto; display:flex; flex-direction:column; }
-.logo { padding:20px 16px; text-align:center; border-bottom:1px solid #333; }
-.logo h2 { color:#409EFF; font-size:18px; margin:0; }
-.logo span { color:#888; font-size:12px; }
+.logo { padding:22px 16px 18px; text-align:center; border-bottom:1px solid #333; }
+.logo h2 {
+  margin:0;
+  font-family:'Orbitron','Segoe UI',system-ui,sans-serif;
+  font-size:23px;
+  font-weight:800;
+  letter-spacing:0.5px;
+  line-height:1.15;
+  white-space:nowrap;
+  background:linear-gradient(120deg,#22d3ee 0%,#6366f1 45%,#a855f7 100%);
+  background-size:200% auto;
+  -webkit-background-clip:text;
+  background-clip:text;
+  -webkit-text-fill-color:transparent;
+  color:transparent;
+  filter:drop-shadow(0 0 10px rgba(99,102,241,.35));
+  animation:logoShimmer 6s linear infinite;
+}
+@keyframes logoShimmer { to { background-position:200% center; } }
+.logo span { display:block; margin-top:6px; color:#9aa0a6; font-size:12px; letter-spacing:6px; }
 .side-menu { border-right:none; flex:1; }
 .user-panel { padding:12px 16px; border-top:1px solid #333; }
 .user-info { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }

@@ -2,7 +2,7 @@
   <div class="page-container" style="max-width:900px">
     <div class="page-header">
       <h1>用户管理</h1>
-      <el-button type="primary" @click="showAdd = true"><el-icon><Plus /></el-icon> 添加用户</el-button>
+      <el-button class="hbtn hbtn--blue" @click="showAdd = true"><el-icon><Plus /></el-icon> 添加用户</el-button>
     </div>
 
     <el-table :data="users" stripe style="width:100%">

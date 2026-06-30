@@ -10,7 +10,7 @@
     <!-- 任务类型选择 -->
     <el-card shadow="never" style="margin-bottom:16px" v-if="step===0">
       <el-form-item label="任务类型" label-width="100px" style="margin-bottom:0">
-        <el-radio-group v-model="taskType">
+        <el-radio-group v-model="taskType" class="radio-cards">
           <el-radio-button label="seg">实例分割（Mask + XML）</el-radio-button>
           <el-radio-button label="det">目标检测（图片 + XML）</el-radio-button>
           <el-radio-button label="obb">旋转检测（图片 + XML）</el-radio-button>

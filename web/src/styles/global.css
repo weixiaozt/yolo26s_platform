@@ -28,6 +28,102 @@ body {
   color: #303133;
 }
 
+/* 操作按钮工具栏：统一对齐 + 间距，避免“有的高有的低/大小不一” */
+.btn-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* el-upload 包裹的按钮与同行普通按钮等高对齐（flex 默认 stretch 会让它顶部错位）*/
+.btn-group .el-upload {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 工具栏内按钮统一高度，杜绝个别按钮显大/显小 */
+.btn-group .el-button {
+  height: 32px;
+  margin: 0;
+}
+
+/* ── 实心彩色按钮（工具栏“漂亮”风格）：渐变 + 阴影 + hover 上浮 ── */
+.el-button.hbtn,
+.el-button.hbtn + .el-button.hbtn {
+  height: 36px;
+  padding: 0 18px;
+  border: none;
+  color: #fff;
+  border-radius: 8px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(31, 45, 61, .12);
+  transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+}
+.el-button.hbtn:hover,
+.el-button.hbtn:focus {
+  color: #fff;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(31, 45, 61, .22);
+  filter: brightness(1.06);
+}
+.el-button.hbtn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(31, 45, 61, .12);
+  filter: brightness(.98);
+}
+.el-button.hbtn.is-disabled,
+.el-button.hbtn.is-disabled:hover {
+  filter: grayscale(.5);
+  opacity: .5;
+  box-shadow: none;
+  transform: none;
+  cursor: not-allowed;
+}
+/* 颜色修饰（写成 .el-button.x 提升优先级，盖过 Element 的 hover 背景）*/
+.el-button.hbtn--blue   { background: linear-gradient(135deg, #5b9bff, #3f78f0); }
+.el-button.hbtn--green  { background: linear-gradient(135deg, #5bd08a, #34b86a); }
+.el-button.hbtn--cyan   { background: linear-gradient(135deg, #3fd0d8, #1cabbb); }
+.el-button.hbtn--orange { background: linear-gradient(135deg, #ffb259, #f5973a); }
+.el-button.hbtn--violet { background: linear-gradient(135deg, #9a8cff, #7559f0); }
+.el-button.hbtn--teal   { background: linear-gradient(135deg, #44d3b5, #14b8a6); }
+.el-button.hbtn--gray   { background: linear-gradient(135deg, #9aa5b1, #6b7785); }
+.el-button.hbtn--red    { background: linear-gradient(135deg, #ff8a8a, #f56c6c); }
+
+/* 紧凑工具栏里的小尺寸彩色按钮（size="small"，与数字输入框等高混排）*/
+.el-button.hbtn.el-button--small {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+}
+
+/* ── 独立分隔的单选按钮组（替代连体 segmented，每颗独立圆角 + 选中渐变）── */
+/* Element 用 (0,3,0)!important 画 first/last-child 的连体圆角，必须用同等特异性盖过 */
+.radio-cards { display: flex; flex-wrap: wrap; gap: 10px; }
+.radio-cards .el-radio-button { margin: 0; }
+.radio-cards .el-radio-button:first-child .el-radio-button__inner,
+.radio-cards .el-radio-button:last-child .el-radio-button__inner,
+.radio-cards .el-radio-button .el-radio-button__inner {
+  border: 1px solid #dcdfe6 !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+  padding: 9px 18px !important;
+  transition: all .15s ease;
+}
+.radio-cards .el-radio-button:first-child:not(.is-active) .el-radio-button__inner:hover,
+.radio-cards .el-radio-button:not(.is-active) .el-radio-button__inner:hover {
+  color: #3f78f0 !important;
+  border-color: #9cc0ff !important;
+}
+.radio-cards .el-radio-button:first-child.is-active .el-radio-button__inner,
+.radio-cards .el-radio-button:last-child.is-active .el-radio-button__inner,
+.radio-cards .el-radio-button.is-active .el-radio-button__inner {
+  background: linear-gradient(135deg, #5b9bff, #3f78f0) !important;
+  border-color: #3f78f0 !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(63, 120, 240, .25) !important;
+}
+
 /* 统计卡片 */
 .stat-cards {
   display: grid;

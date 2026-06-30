@@ -29,22 +29,22 @@
 
         <!-- 选图（不自动推理） -->
         <el-upload :auto-upload="false" :show-file-list="false" :on-change="onSelectFile" accept=".bmp,.png,.jpg,.jpeg,.tif,.tiff" multiple>
-          <el-button size="small"><el-icon><Plus /></el-icon> 选图</el-button>
+          <el-button class="hbtn hbtn--cyan" size="small"><el-icon><Plus /></el-icon> 选图</el-button>
         </el-upload>
 
         <!-- 开始推理 / 清空队列 -->
-        <el-button v-if="pending.length>0" type="primary" :loading="inferring" size="small" @click="runPending">
+        <el-button v-if="pending.length>0" class="hbtn hbtn--blue" :loading="inferring" size="small" @click="runPending">
           <el-icon><VideoPlay /></el-icon> 开始推理 ({{ pending.length }})
         </el-button>
-        <el-button v-if="pending.length>0" size="small" @click="clearPending">清空队列</el-button>
+        <el-button v-if="pending.length>0" class="hbtn hbtn--gray" size="small" @click="clearPending">清空队列</el-button>
 
         <!-- 一键推理训练图 -->
-        <el-button type="success" size="small" @click="showProjectImagesDialog=true" :disabled="!selModel">
+        <el-button class="hbtn hbtn--green" size="small" @click="showProjectImagesDialog=true" :disabled="!selModel">
           <el-icon><DataLine /></el-icon> 推理训练图
         </el-button>
 
         <!-- 切割小图（仅 seg 项目） -->
-        <el-button v-if="projectTaskType==='seg'" type="warning" size="small"
+        <el-button v-if="projectTaskType==='seg'" class="hbtn hbtn--orange" size="small"
           :disabled="history.length===0 || cropping" :loading="cropping"
           @click="cropDefects">
           <el-icon><Scissor /></el-icon> 切割小图

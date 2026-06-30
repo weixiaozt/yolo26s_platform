@@ -5,7 +5,7 @@
         <h1>标注转换</h1>
         <el-tag size="small" type="info">seg ⇆ det ⇆ obb</el-tag>
       </div>
-      <el-button @click="loadProjects" :loading="loading">
+      <el-button class="hbtn hbtn--cyan" @click="loadProjects" :loading="loading">
         <el-icon><Refresh /></el-icon> 刷新
       </el-button>
     </div>

@@ -5,7 +5,7 @@
         <el-button text @click="router.push(`/project/${id}`)"><el-icon><ArrowLeft /></el-icon> 返回项目</el-button>
         <h1>训练监控</h1>
       </div>
-      <el-button type="primary" @click="router.push(`/project/${id}/train`)">
+      <el-button class="hbtn hbtn--blue" @click="router.push(`/project/${id}/train`)">
         <el-icon><Plus /></el-icon> 新建训练
       </el-button>
     </div>
@@ -64,8 +64,8 @@
           <div style="display:flex;justify-content:space-between;align-items:center">
             <span style="font-weight:600">训练参数 — {{ selectedTask.task_name }}</span>
             <div style="display:flex;gap:8px">
-              <el-button text size="small" @click="copyConfig">
-                <el-icon><DocumentCopy /></el-icon> 复制 JSON
+              <el-button text size="small" @click="exportConfig">
+                <el-icon><Download /></el-icon> 导出 JSON
               </el-button>
               <el-button text size="small" @click="paramsExpanded = !paramsExpanded">
                 {{ paramsExpanded ? '收起' : '展开' }}
@@ -289,13 +289,19 @@ function formatValue(k: string, fmt?: string): string {
   if (fmt === 'fix4' && typeof v === 'number') return v.toFixed(4)
   return String(v)
 }
-async function copyConfig() {
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(cfg.value, null, 2))
-    ElMessage.success('训练参数 JSON 已复制到剪贴板')
-  } catch {
-    ElMessage.warning('复制失败，请手动选择文本')
-  }
+function exportConfig() {
+  const name = selectedTask.value?.task_name || 'train-config'
+  const blob = new Blob([JSON.stringify(cfg.value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  const safe = String(name).replace(/[\\/:*?"<>|\s]+/g, '_')
+  a.download = `train-params-${safe}.json`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  ElMessage.success('训练参数已导出为 JSON 文件，可在训练配置页「导入参数」')
 }
 
 // Chart refs

@@ -10,20 +10,21 @@
         <h1>{{ project?.name }}</h1>
         <el-button text type="primary" @click="openEditDialog" style="font-size:13px">编辑项目</el-button>
       </div>
-      <div class="header-actions">
-        <el-button type="primary" @click="showUpload = true">
+      <div class="header-actions btn-group">
+        <el-button class="hbtn hbtn--blue" @click="showUpload = true">
           <el-icon><Upload /></el-icon>
           上传图像
         </el-button>
         <el-button
           v-if="project?.task_type === 'cls'"
-          type="primary" plain
+          class="hbtn hbtn--teal"
           @click="router.push(`/cls-annotate/${id}`)"
         >
+          <el-icon><Grid /></el-icon>
           批量分类标注
         </el-button>
         <el-button
-          type="success"
+          class="hbtn hbtn--green"
           :disabled="!project || project.labeled_count + project.reviewed_count === 0"
           @click="router.push(`/project/${id}/train`)"
         >
@@ -31,19 +32,24 @@
           训练模型
         </el-button>
         <el-button
+          class="hbtn hbtn--cyan"
           @click="router.push(`/project/${id}/train/monitor`)"
         >
+          <el-icon><TrendCharts /></el-icon>
           训练监控
         </el-button>
         <el-button
-          type="warning"
+          class="hbtn hbtn--orange"
           @click="router.push(`/project/${id}/inference`)"
         >
+          <el-icon><Aim /></el-icon>
           在线推断
         </el-button>
         <el-button
+          class="hbtn hbtn--violet"
           @click="router.push(`/project/${id}/export`)"
         >
+          <el-icon><Switch /></el-icon>
           模型转换
         </el-button>
       </div>
@@ -521,6 +527,7 @@ function randomColor() {
 }
 .header-actions {
   display: flex;
+  align-items: center;
   gap: 10px;
 }
 .stat-cards .stat-card {
