@@ -42,6 +42,20 @@ export interface ProjectCreate {
   class_names?: DefectClass[]
 }
 
+export interface MergeReport {
+  task_type: string
+  pack_images: number
+  pack_annotations: number
+  matched_images: number
+  new_images: number
+  added_annotations: number
+  skipped_duplicates: number
+  new_classes: string[]
+  cls_conflicts: { filename: string; target_class: string; incoming_class: string }[]
+  unmatched_no_image: number
+  dry_run: boolean
+}
+
 export const projectApi = {
   list: () =>
     api.get<Project[]>('/projects'),
@@ -75,6 +89,16 @@ export const projectApi = {
     fd.append('file', file)
     return api.post<{ project_id: number; project_name: string; renamed: boolean; image_count: number; annotation_count: number }>(
       '/projects/import-package',
+      fd,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000 }
+    )
+  },
+
+  mergePackage: (projectId: number, file: File, dryRun: boolean) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<MergeReport>(
+      `/projects/${projectId}/merge-package?dry_run=${dryRun}`,
       fd,
       { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000 }
     )

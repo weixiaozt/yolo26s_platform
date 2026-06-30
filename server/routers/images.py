@@ -3,6 +3,7 @@
 图像管理 API
 """
 
+import hashlib
 import shutil
 import uuid
 from pathlib import Path
@@ -96,6 +97,7 @@ async def upload_images(
             continue
         content = b"".join(content_chunks)
         save_path.write_bytes(content)
+        content_hash = hashlib.sha256(content).hexdigest()
 
         # 读取图像尺寸
         img_array = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_UNCHANGED)
@@ -118,6 +120,7 @@ async def upload_images(
             width=w,
             height=h,
             file_size=len(content),
+            content_hash=content_hash,
         )
         db.add(image)
         db.flush()

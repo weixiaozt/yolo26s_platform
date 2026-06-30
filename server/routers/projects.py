@@ -27,7 +27,9 @@ from ..models.train_task import TrainTask
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut, ProjectStats, DefectClassCreate, DefectClassOut,
 )
-from ..services.project_package import export_project_to_zip, import_project_from_zip
+from ..services.project_package import (
+    export_project_to_zip, import_project_from_zip, merge_pack_into_project,
+)
 from ..services.project_convert import convert_project_task_type
 
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
@@ -286,6 +288,39 @@ async def import_package(file: UploadFile = File(...), db: Session = Depends(get
     except Exception as e:
         log.exception("import_project_from_zip failed for upload=%s", file.filename)
         raise HTTPException(status_code=500, detail=f"导入失败: {e}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@router.post("/{project_id}/merge-package")
+async def merge_package(
+    project_id: int,
+    file: UploadFile = File(...),
+    dry_run: bool = False,
+    db: Session = Depends(get_db),
+):
+    """把标注包（export 格式 ZIP）合并进【当前已有】项目：按图片内容哈希匹配同一张图，
+    标注并集去重，包里独有的新标注图连图带标注落地。dry_run=true 只返回预览统计不写库。"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="请上传 ZIP 文件")
+
+    fd, tmp_str = tempfile.mkstemp(suffix=".zip", prefix="proj_merge_")
+    tmp_path = Path(tmp_str)
+    try:
+        os.close(fd)
+        content = await file.read()
+        tmp_path.write_bytes(content)
+        with open(tmp_path, "rb") as f:
+            result = merge_pack_into_project(f, project_id, db, dry_run=dry_run)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("merge_pack_into_project failed for upload=%s into project=%s", file.filename, project_id)
+        raise HTTPException(status_code=500, detail=f"合并失败: {e}")
     finally:
         tmp_path.unlink(missing_ok=True)
 

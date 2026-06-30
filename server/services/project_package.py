@@ -14,14 +14,17 @@ ZIP 结构:
         └── {filename}
 """
 
+import hashlib
 import json
 import shutil
 import uuid
 import zipfile
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -32,6 +35,18 @@ from ..models.annotation import Annotation
 
 # 单个 ZIP 内文件解压后大小上限（防 zip bomb），200MB 远超任何真实工业图
 _MAX_ENTRY_SIZE = 200 * 1024 * 1024
+
+
+def _sha256_file(path: Path) -> str | None:
+    """流式计算文件 sha256（大图也不爆内存）。"""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
 
 
 def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
@@ -85,6 +100,9 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
             # ZIP 内文件名使用 file_path 的 basename（已含 uuid 前缀，保证唯一）
             zip_img_name = Path(img.file_path).name
 
+            # 内容哈希：优先用 DB 列；存量未 backfill 的现场流式计算（合并标注集时按它匹配同一张图）
+            content_hash = img.content_hash or _sha256_file(src_path)
+
             # cls 图级标签：用 class_index（跨项目可移植）；非 cls 留空
             images_data.append({
                 "zip_filename": zip_img_name,
@@ -95,6 +113,7 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
                 "annotator": img.annotator,
                 "reviewer": img.reviewer,
                 "class_index": class_id_to_index.get(img.class_id) if img.class_id else None,
+                "content_hash": content_hash,
             })
 
             zf.write(str(src_path), f"images/{zip_img_name}")
@@ -229,6 +248,7 @@ def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
                 annotator=img_info.get("annotator"),
                 reviewer=img_info.get("reviewer"),
                 class_id=cls_id,
+                content_hash=img_info.get("content_hash") or _sha256_file(target_path),
             )
             db.add(image)
             db.flush()
@@ -262,3 +282,306 @@ def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
             "image_count": imported_images,
             "annotation_count": imported_anns,
         }
+
+
+# ============================================================================
+# 合并标注包（把另一台机器的标注集合并进【已有】项目，并集去重）
+# ============================================================================
+
+def _pt_xy(p) -> tuple:
+    """取多边形顶点坐标，兼容 {"x":..,"y":..} 字典 与 [x, y] 列表 两种历史格式。"""
+    if isinstance(p, dict):
+        return float(p.get("x", 0)), float(p.get("y", 0))
+    return float(p[0]), float(p[1])
+
+
+def _poly_bbox(polygon: list) -> tuple:
+    pts = [_pt_xy(p) for p in polygon]
+    xs = [x for x, _ in pts]
+    ys = [y for _, y in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _bbox_overlap(a: tuple, b: tuple) -> bool:
+    """两个归一化外接框是否有交叠（无交叠的多边形不可能等价，省去栅格化）。"""
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+def _poly_iou_local(p1: list, p2: list, size: int = 256) -> float:
+    """在两条多边形【并集包围盒】内做局部栅格化算 IoU——尺度无关，
+    再小的框（归一化尺寸 < 1/全图栅格）也能精确比较，不会塌成空 mask。"""
+    import numpy as np
+    import cv2
+    b1, b2 = _poly_bbox(p1), _poly_bbox(p2)
+    minx, miny = min(b1[0], b2[0]), min(b1[1], b2[1])
+    maxx, maxy = max(b1[2], b2[2]), max(b1[3], b2[3])
+    w, h = maxx - minx, maxy - miny
+    if w <= 0 or h <= 0:
+        return 0.0
+
+    def _pts(poly):
+        out = []
+        for p in poly:
+            x, y = _pt_xy(p)
+            out.append([(x - minx) / w * (size - 1), (y - miny) / h * (size - 1)])
+        return np.array(out, dtype=np.int32)
+
+    m1 = np.zeros((size, size), dtype=np.uint8)
+    m2 = np.zeros((size, size), dtype=np.uint8)
+    cv2.fillPoly(m1, [_pts(p1)], 1)
+    cv2.fillPoly(m2, [_pts(p2)], 1)
+    inter = int(np.logical_and(m1, m2).sum())
+    union = int(np.logical_or(m1, m2).sum())
+    return inter / union if union > 0 else 0.0
+
+
+def _polys_equivalent(p1: list, p2: list, iou_thresh: float = 0.85) -> bool:
+    """同一张图上两条多边形是否"是同一个标注"。
+    1) 坐标序列几乎一致 → 直接判重（『同名同标注』/自合并 一定命中，保证幂等）
+    2) 否则在并集包围盒内做局部栅格化 IoU ≥ 阈值 → 视为同一条（容忍轻微重绘）
+       位置/大小明显不同 → 保留为两条（并集）。"""
+    if not p1 or not p2 or len(p1) < 3 or len(p2) < 3:
+        return False
+    # 精确判等快路径（坐标几乎逐点相同），尺度无关、对极小框也成立
+    if len(p1) == len(p2):
+        same = True
+        for a, b in zip(p1, p2):
+            ax, ay = _pt_xy(a)
+            bx, by = _pt_xy(b)
+            if abs(ax - bx) >= 1e-6 or abs(ay - by) >= 1e-6:
+                same = False
+                break
+        if same:
+            return True
+    if not _bbox_overlap(_poly_bbox(p1), _poly_bbox(p2)):
+        return False
+    return _poly_iou_local(p1, p2) >= iou_thresh
+
+
+_STATUS_ORDER = {"unlabeled": 0, "labeling": 1, "labeled": 2, "reviewed": 3}
+
+
+def _max_status(a: str | None, b: str | None) -> str:
+    a = a if a in _STATUS_ORDER else "unlabeled"
+    b = b if b in _STATUS_ORDER else "unlabeled"
+    return a if _STATUS_ORDER[a] >= _STATUS_ORDER[b] else b
+
+
+def merge_pack_into_project(
+    zip_file: BinaryIO, target_project_id: int, db: Session,
+    dry_run: bool = False, iou_thresh: float = 0.85,
+) -> dict:
+    """把一个标注包（export 格式 ZIP）合并进【已有】项目。
+
+    - 按图片内容 sha256 匹配"同一张图"（filename+尺寸兜底）
+    - 命中：标注并集去重（同类别 + polygon IoU≥阈值 视为重复跳过），状态取高位，
+            cls 图级标签目标为空则取包里的、两边都有且不同 → 记冲突保留目标
+    - 未命中：包里独有的新标注图，连图带标注一起落地（缺图字节的超瘦包则跳过）
+    - 缺失类别自动补建（按 name/class_index 映射）
+    - dry_run=True 只统计不写库不落盘
+    """
+    project = db.query(Project).filter(Project.id == target_project_id).first()
+    if not project:
+        raise ValueError(f"目标项目 {target_project_id} 不存在")
+
+    with zipfile.ZipFile(zip_file) as zf:
+        required = {"project.json", "images.json", "annotations.json"}
+        names = set(zf.namelist())
+        if not required.issubset(names):
+            raise ValueError(f"ZIP 缺少必要文件: {required - names}")
+
+        project_data = json.loads(zf.read("project.json").decode("utf-8"))
+        images_data = json.loads(zf.read("images.json").decode("utf-8"))
+        annotations_data = json.loads(zf.read("annotations.json").decode("utf-8"))
+
+        pack_task = project_data.get("task_type", "seg")
+        if pack_task != project.task_type:
+            raise ValueError(f"任务类型不一致：目标项目是 {project.task_type}，标注包是 {pack_task}")
+
+        report = {
+            "task_type": project.task_type,
+            "pack_images": len(images_data),
+            "pack_annotations": len(annotations_data),
+            "matched_images": 0,
+            "new_images": 0,
+            "added_annotations": 0,
+            "skipped_duplicates": 0,
+            "new_classes": [],
+            "cls_conflicts": [],
+            "unmatched_no_image": 0,
+            "dry_run": dry_run,
+        }
+
+        # ---- 1) 类别映射：按 name 优先、class_index 次之；缺的补建 ----
+        target_classes = db.query(DefectClass).filter(DefectClass.project_id == target_project_id).all()
+        name_to_dc = {dc.name: dc for dc in target_classes}
+        idx_to_dc = {dc.class_index: dc for dc in target_classes}
+        target_clsid_to_name = {dc.id: dc.name for dc in target_classes}
+        used_indices = {dc.class_index for dc in target_classes}
+        packidx_to_clsid: dict = {}
+        packidx_to_name = {c.get("class_index"): c.get("name") for c in project_data.get("defect_classes", [])}
+        for cls in project_data.get("defect_classes", []):
+            ci = cls.get("class_index")
+            cname = cls.get("name", f"class_{ci}")
+            dc = name_to_dc.get(cname) or idx_to_dc.get(ci)
+            if dc is not None:
+                packidx_to_clsid[ci] = dc.id
+            else:
+                report["new_classes"].append(cname)
+                if dry_run:
+                    packidx_to_clsid[ci] = None
+                else:
+                    new_idx = ci if ci not in used_indices else (max(used_indices) + 1 if used_indices else 0)
+                    used_indices.add(new_idx)
+                    ndc = DefectClass(project_id=target_project_id, class_index=new_idx,
+                                      name=cname, color=cls.get("color", "#FF0000"))
+                    db.add(ndc)
+                    db.flush()
+                    name_to_dc[cname] = ndc
+                    idx_to_dc[new_idx] = ndc
+                    target_clsid_to_name[ndc.id] = cname
+                    packidx_to_clsid[ci] = ndc.id
+
+        # ---- 2) 目标图片按 content_hash 建索引（缺哈希现算兜底，顺手 backfill）----
+        # 同一内容若有多张目标图（含未标注的重复图），选【状态最高 + 标注最多】那张当合并锚点，
+        # 否则可能把已标注图的标注错算成"新增"（合并到了空的未标注重复图上）。
+        upload_root = settings.upload_path
+        target_images = db.query(Image).filter(Image.project_id == target_project_id).all()
+        ann_counts = dict(
+            db.query(Annotation.image_id, func.count(Annotation.id))
+            .join(Image, Annotation.image_id == Image.id)
+            .filter(Image.project_id == target_project_id)
+            .group_by(Annotation.image_id).all()
+        )
+
+        def _img_rank(im):
+            return (_STATUS_ORDER.get(im.status, 0), ann_counts.get(im.id, 0))
+
+        hash_to_img: dict = {}
+        fnsize_to_img: dict = {}
+        for timg in target_images:
+            h = timg.content_hash
+            if not h:
+                h = _sha256_file(upload_root / timg.file_path)
+                if h and not dry_run:
+                    timg.content_hash = h
+            if h:
+                cur = hash_to_img.get(h)
+                if cur is None or _img_rank(timg) > _img_rank(cur):
+                    hash_to_img[h] = timg
+            key = (timg.filename, timg.width, timg.height)
+            cur2 = fnsize_to_img.get(key)
+            if cur2 is None or _img_rank(timg) > _img_rank(cur2):
+                fnsize_to_img[key] = timg
+
+        # ---- 3) 包内标注按图分组 ----
+        anns_by_zipname = defaultdict(list)
+        for a in annotations_data:
+            anns_by_zipname[a.get("image_zip_filename")].append(a)
+
+        upload_dir = upload_root / str(target_project_id)
+        upload_dir_resolved = upload_dir.resolve()
+        if not dry_run:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
+        # ---- 4) 逐图合并 ----
+        for img_info in images_data:
+            zip_name = img_info.get("zip_filename")
+            chash = img_info.get("content_hash")
+            tgt = hash_to_img.get(chash) if chash else None
+            if tgt is None:
+                tgt = fnsize_to_img.get((img_info.get("original_filename"), img_info.get("width"), img_info.get("height")))
+            incoming_anns = anns_by_zipname.get(zip_name, [])
+
+            if tgt is not None:
+                # —— 命中：标注并集去重 ——
+                report["matched_images"] += 1
+                accepted: dict = defaultdict(list)
+                for ex in tgt.annotations:
+                    accepted[ex.class_id].append(ex.polygon)
+                for a in incoming_anns:
+                    clsid = packidx_to_clsid.get(a.get("class_index"))
+                    poly = a.get("polygon") or []
+                    pool = accepted.get(clsid, []) if clsid is not None else []
+                    if any(_polys_equivalent(poly, ep, iou_thresh) for ep in pool):
+                        report["skipped_duplicates"] += 1
+                        continue
+                    report["added_annotations"] += 1
+                    if clsid is not None:
+                        accepted[clsid].append(poly)
+                        if not dry_run:
+                            db.add(Annotation(image_id=tgt.id, class_id=clsid, polygon=poly,
+                                              area=a.get("area"), bbox=a.get("bbox"), created_by=a.get("created_by")))
+                new_status = _max_status(tgt.status, img_info.get("status", "unlabeled"))
+                if not dry_run and new_status != tgt.status:
+                    tgt.status = new_status
+                if project.task_type == "cls":
+                    in_ci = img_info.get("class_index")
+                    in_clsid = packidx_to_clsid.get(in_ci) if in_ci is not None else None
+                    if in_clsid is not None:
+                        if tgt.class_id is None:
+                            if not dry_run:
+                                tgt.class_id = in_clsid
+                        elif tgt.class_id != in_clsid:
+                            report["cls_conflicts"].append({
+                                "filename": tgt.filename,
+                                "target_class": target_clsid_to_name.get(tgt.class_id, str(tgt.class_id)),
+                                "incoming_class": packidx_to_name.get(in_ci, str(in_ci)),
+                            })
+            else:
+                # —— 未命中：包里独有的新标注图，连图带标注落地 ——
+                safe_name = Path(zip_name).name if zip_name else ""
+                zip_path_in_archive = f"images/{safe_name}"
+                if not safe_name or safe_name in (".", "..") or zip_path_in_archive not in names:
+                    report["unmatched_no_image"] += 1
+                    continue
+                if dry_run:
+                    report["new_images"] += 1
+                    report["added_annotations"] += len(incoming_anns)
+                    continue
+                try:
+                    info = zf.getinfo(zip_path_in_archive)
+                    if info.file_size > _MAX_ENTRY_SIZE:
+                        report["unmatched_no_image"] += 1
+                        continue
+                except KeyError:
+                    report["unmatched_no_image"] += 1
+                    continue
+                new_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+                target_path = upload_dir / new_name
+                if not target_path.resolve().is_relative_to(upload_dir_resolved):
+                    report["unmatched_no_image"] += 1
+                    continue
+                with zf.open(zip_path_in_archive) as src, open(target_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                cls_idx = img_info.get("class_index")
+                cls_id = packidx_to_clsid.get(cls_idx) if cls_idx is not None else None
+                nimg = Image(
+                    project_id=target_project_id,
+                    filename=img_info.get("original_filename", safe_name),
+                    file_path=f"{target_project_id}/{new_name}",
+                    width=img_info.get("width", 0),
+                    height=img_info.get("height", 0),
+                    file_size=target_path.stat().st_size,
+                    status=img_info.get("status", "labeled"),
+                    annotator=img_info.get("annotator"),
+                    reviewer=img_info.get("reviewer"),
+                    class_id=cls_id,
+                    content_hash=chash or _sha256_file(target_path),
+                )
+                db.add(nimg)
+                db.flush()
+                report["new_images"] += 1
+                for a in incoming_anns:
+                    clsid = packidx_to_clsid.get(a.get("class_index"))
+                    if clsid is None:
+                        continue
+                    db.add(Annotation(image_id=nimg.id, class_id=clsid, polygon=a.get("polygon") or [],
+                                      area=a.get("area"), bbox=a.get("bbox"), created_by=a.get("created_by")))
+                    report["added_annotations"] += 1
+
+        if dry_run:
+            db.rollback()
+        else:
+            db.commit()
+        return report

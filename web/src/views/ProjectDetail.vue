@@ -15,6 +15,10 @@
           <el-icon><Upload /></el-icon>
           上传图像
         </el-button>
+        <el-button class="hbtn hbtn--gray" @click="openMerge">
+          <el-icon><Connection /></el-icon>
+          合并标注包
+        </el-button>
         <el-button
           v-if="project?.task_type === 'cls'"
           class="hbtn hbtn--teal"
@@ -208,6 +212,62 @@
       </template>
     </el-dialog>
 
+    <!-- 合并标注包对话框 -->
+    <el-dialog v-model="showMerge" title="合并标注包" width="560px" @close="resetMerge">
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom:14px"
+        title="把另一台机器导出的标注包合并进当前项目"
+        description="按图片内容匹配同一张图，标注并集去重（重复的自动跳过）；对方独有的新标注图连图带标注一起合进来。先预览，确认后再写入。" />
+
+      <el-upload
+        v-if="!mergeReport && !mergeChecking"
+        drag :auto-upload="false" :show-file-list="false" accept=".zip"
+        :on-change="onMergeFileChange"
+      >
+        <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+        <div class="el-upload__text">拖拽标注包 ZIP，或<em>点击选择</em></div>
+        <template #tip>
+          <div class="el-upload__tip">导出的项目包即可（只含已标注图 + 标注）；选择后先预览不写入</div>
+        </template>
+      </el-upload>
+
+      <div v-if="mergeChecking" style="text-align:center;padding:24px;color:#909399">
+        <el-icon class="is-loading"><Loading /></el-icon> 正在预览合并结果…
+      </div>
+
+      <div v-if="mergeReport" class="merge-report">
+        <div class="mr-file">📦 {{ mergeFileName }}</div>
+        <div class="mr-grid">
+          <div class="mr-cell"><div class="mr-num">{{ mergeReport.matched_images }}</div><div class="mr-lbl">匹配同一张图</div></div>
+          <div class="mr-cell"><div class="mr-num" style="color:#3f78f0">+{{ mergeReport.added_annotations }}</div><div class="mr-lbl">新增标注</div></div>
+          <div class="mr-cell"><div class="mr-num" style="color:#34b86a">+{{ mergeReport.new_images }}</div><div class="mr-lbl">新增标注图</div></div>
+          <div class="mr-cell"><div class="mr-num" style="color:#909399">{{ mergeReport.skipped_duplicates }}</div><div class="mr-lbl">跳过重复</div></div>
+        </div>
+        <div class="mr-note">包内共 {{ mergeReport.pack_images }} 张标注图 / {{ mergeReport.pack_annotations }} 条标注</div>
+        <el-alert v-if="mergeReport.new_classes.length" type="warning" :closable="false" style="margin-top:10px"
+          :title="`将新建 ${mergeReport.new_classes.length} 个类别：${mergeReport.new_classes.join('、')}`" />
+        <el-alert v-if="mergeReport.cls_conflicts.length" type="error" :closable="false" style="margin-top:10px"
+          :title="`${mergeReport.cls_conflicts.length} 张图分类标签冲突（保留当前项目的）`">
+          <div style="max-height:120px;overflow:auto;font-size:12px;margin-top:4px">
+            <div v-for="(c,i) in mergeReport.cls_conflicts" :key="i">{{ c.filename }}：当前「{{ c.target_class }}」← 包里「{{ c.incoming_class }}」</div>
+          </div>
+        </el-alert>
+        <el-alert v-if="mergeReport.unmatched_no_image" type="info" :closable="false" style="margin-top:10px"
+          :title="`${mergeReport.unmatched_no_image} 张新图因包内没带图片字节被跳过`" />
+        <el-alert v-if="mergeReport.added_annotations===0 && mergeReport.new_images===0 && mergeReport.new_classes.length===0"
+          type="success" :closable="false" style="margin-top:10px" title="没有可合并的新内容（全部已存在）" />
+      </div>
+
+      <template #footer>
+        <el-button @click="showMerge = false">取消</el-button>
+        <el-button
+          v-if="mergeReport"
+          class="hbtn hbtn--gray" :loading="merging"
+          :disabled="mergeReport.added_annotations===0 && mergeReport.new_images===0 && mergeReport.new_classes.length===0"
+          @click="confirmMerge"
+        >确认合并</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 编辑项目对话框 -->
     <el-dialog v-model="showEdit" title="编辑项目" width="640px" destroy-on-close>
       <el-form label-width="100px" label-position="left">
@@ -287,7 +347,7 @@
 import { ref, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { projectApi, type ProjectStats } from '../api/project'
+import { projectApi, type ProjectStats, type MergeReport } from '../api/project'
 import { imageApi, type ImageInfo } from '../api/image'
 import type { UploadFile } from 'element-plus'
 
@@ -445,6 +505,52 @@ async function handleUpload() {
   }
 }
 
+// ---- 合并标注包 ----
+const showMerge = ref(false)
+const mergeFile = ref<File | null>(null)
+const mergeFileName = ref('')
+const mergeChecking = ref(false)
+const merging = ref(false)
+const mergeReport = ref<MergeReport | null>(null)
+
+function openMerge() { resetMerge(); showMerge.value = true }
+function resetMerge() {
+  mergeFile.value = null; mergeFileName.value = ''
+  mergeReport.value = null; mergeChecking.value = false; merging.value = false
+}
+async function onMergeFileChange(uf: UploadFile) {
+  if (!uf.raw) return
+  mergeFile.value = uf.raw
+  mergeFileName.value = uf.name
+  mergeChecking.value = true
+  mergeReport.value = null
+  try {
+    const { data } = await projectApi.mergePackage(projectId, uf.raw, true)
+    mergeReport.value = data
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '预览失败，请确认是导出的项目包')
+    resetMerge()
+  } finally {
+    mergeChecking.value = false
+  }
+}
+async function confirmMerge() {
+  if (!mergeFile.value) return
+  merging.value = true
+  try {
+    const { data } = await projectApi.mergePackage(projectId, mergeFile.value, false)
+    ElMessage.success(`合并完成：新增标注 ${data.added_annotations} 条、新增图 ${data.new_images} 张、跳过重复 ${data.skipped_duplicates} 条`)
+    showMerge.value = false
+    resetMerge()
+    loadProject()
+    loadImages(1)
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '合并失败')
+  } finally {
+    merging.value = false
+  }
+}
+
 onMounted(() => {
   loadProject()
   loadImages()
@@ -530,6 +636,13 @@ function randomColor() {
   align-items: center;
   gap: 10px;
 }
+.merge-report { margin-top: 4px; }
+.mr-file { font-size: 13px; color: #606266; margin-bottom: 12px; word-break: break-all; }
+.mr-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.mr-cell { background: #f6f8fb; border: 1px solid #eceff5; border-radius: 8px; padding: 12px 6px; text-align: center; }
+.mr-num { font-size: 22px; font-weight: 700; color: #303133; line-height: 1.1; }
+.mr-lbl { font-size: 12px; color: #909399; margin-top: 4px; }
+.mr-note { font-size: 12px; color: #909399; margin-top: 12px; }
 .stat-cards .stat-card {
   cursor: pointer;
   transition: transform 0.15s;

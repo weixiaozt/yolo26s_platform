@@ -23,6 +23,11 @@ class Image(Base):
     width: Mapped[int] = mapped_column(Integer, default=0)
     height: Mapped[int] = mapped_column(Integer, default=0)
     file_size: Mapped[int] = mapped_column(BigInteger, default=0)
+    # 图片内容 sha256（hex），用于跨机器合并标注时按内容匹配"同一张图"
+    content_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True,
+        comment="图片字节 sha256，跨机器合并标注集时匹配同一张图",
+    )
 
     status: Mapped[str] = mapped_column(
         Enum("unlabeled", "labeling", "labeled", "reviewed", name="image_status"),
