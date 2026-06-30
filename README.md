@@ -1,4 +1,4 @@
-# YOLO26s-Seg 工业缺陷检测全栈平台
+# VP_vision 工业缺陷检测全栈平台
 
 > 一站式工业视觉缺陷检测平台 — 标注、训练、推断、模型导出全流程闭环。
 > 面向硅晶圆 / 方锭 / 光伏组件等工业场景，支持 4 种任务类型一键切换。
@@ -29,6 +29,8 @@
 - **在线推断** — 训练图抽样 / 网格视图 / 缺陷小图打 zip / cancelled 任务也能推断
 - **模型导出** — ONNX / OpenVINO / TensorRT 三种格式，FP32 / FP16 / INT8 精度可选
 - **标注互转** — seg ⇄ det ⇄ obb 三向转换，原标注无损保留
+- **训练参数互通** — 训练配置 / 监控页一键导出参数 JSON，新任务一键导入，跨项目复用调参不用逐个调
+- **多机协同标注合并** — 标注集跨机器导出 / 合并：按图片内容哈希匹配"同一张图"，标注并集去重，对方独有的新标注图连图带标注一起合进来，多台电脑分头标注互不重复
 
 ---
 
@@ -48,7 +50,7 @@
 
 ### 训练监控 — Loss 曲线 + mAP + 完整参数
 
-实时显示训练进度、最佳 mAP50、每个 epoch 的 Box/Seg/Cls/DFL Loss 曲线。"训练参数"卡片可一键复制 JSON，下次直接套用。
+实时显示训练进度、最佳 mAP50、每个 epoch 的 Box/Seg/Cls/DFL Loss 曲线。"训练参数"卡片可一键导出 JSON 文件，到训练配置页「导入参数」即可一键套用到新任务。
 
 ![训练监控](docs/screenshots/03-train-monitor.png)
 
@@ -124,7 +126,7 @@ D:\yolo26s_platform\
 │   ├── routers/             ← REST API 路由
 │   ├── services/
 │   │   ├── dataset_service.py    ← 4 种 task 数据集准备
-│   │   ├── project_package.py    ← 项目导出 / 导入
+│   │   ├── project_package.py    ← 项目导出 / 导入 / 合并标注包（content_hash 去重）
 │   │   └── project_convert.py    ← 标注 seg ⇄ det ⇄ obb 互转
 │   ├── tasks/train_task.py  ← Celery 训练任务
 │   └── database.py          ← 自动迁移 ALTER TABLE
@@ -140,6 +142,7 @@ D:\yolo26s_platform\
 │   └── api/
 ├── tools/
 │   ├── cleanup_storage.py        ← 存储瘦身（保守模式）
+│   ├── backfill_image_hash.py    ← 给存量图补内容哈希（合并标注包用）
 │   ├── verify_cls.py             ← cls 模型全量验证
 │   └── test_cls_pipeline.py      ← cls 端到端回归测试
 ├── start_all.bat / start_*.bat   ← 一键启动
@@ -244,7 +247,7 @@ $env:YOLO_AUTOINSTALL="False"
 uvicorn server.main:app --host 0.0.0.0 --port 8000
 ```
 
-看到 "YOLO26s-Seg 标注训练平台 后端已启动" 即成功，按 Ctrl+C 停止。
+看到 "后端已启动" 字样即成功，按 Ctrl+C 停止。
 
 ### 7. 启动 Celery Worker
 
