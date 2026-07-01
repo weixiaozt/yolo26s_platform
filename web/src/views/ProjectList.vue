@@ -222,7 +222,7 @@ const groupedProjects = computed(() => {
 
 const defaultColors = ['#FF4444', '#44BB44', '#4488FF', '#FFAA00', '#FF44FF', '#44FFFF']
 
-const form = ref<ProjectCreate>({
+const form = ref<ProjectCreate & { class_names: DefectClass[] }>({
   name: '',
   description: '',
   task_type: 'seg',

@@ -556,9 +556,8 @@ onMounted(() => {
   loadImages()
 })
 
-// ---- 编辑项目 ----
+// ---- 编辑项目 ----（projectApi 已在文件顶部导入）
 import type { DefectClass } from '../api/project'
-import { projectApi } from '../api/project'
 
 const showEdit = ref(false)
 const saving = ref(false)

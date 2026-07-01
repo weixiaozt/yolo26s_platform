@@ -113,7 +113,7 @@
         </el-table-column>
         <el-table-column label="操作" width="90">
           <template #default="{row}">
-            <a :href="`/api/export/download/pt/${row.task_id}/${row.type}`" target="_blank" style="color:#409EFF;font-size:13px;text-decoration:none">下载</a>
+            <a :href="dlUrl(`/api/export/download/pt/${row.task_id}/${row.type}`)" target="_blank" style="color:#409EFF;font-size:13px;text-decoration:none">下载</a>
           </template>
         </el-table-column>
       </el-table>
@@ -173,7 +173,7 @@
         </el-table-column>
         <el-table-column label="操作" width="130" fixed="right">
           <template #default="{row}">
-            <a v-if="row.status==='completed'" :href="`/api/export/download/exported/${row.id}`" target="_blank" style="color:#409EFF;font-size:13px;text-decoration:none;margin-right:12px">下载</a>
+            <a v-if="row.status==='completed'" :href="dlUrl(`/api/export/download/exported/${row.id}`)" target="_blank" style="color:#409EFF;font-size:13px;text-decoration:none;margin-right:12px">下载</a>
             <el-button v-if="row.status!=='exporting'" type="danger" text size="small" @click="deleteExport(row.id)">删除</el-button>
           </template>
         </el-table-column>
@@ -345,10 +345,14 @@ function statusText(s: string) {
   } as any)[s] || s
 }
 
+function dlUrl(path: string) {
+  // 下载走浏览器原生请求（a[href]/window.open），不带 Authorization 头，用 ?token= 传鉴权
+  return `${path}?token=${localStorage.getItem('token') || ''}`
+}
 function downloadPt(taskId: number, modelType: string) {
-  window.open(`/api/export/download/pt/${taskId}/${modelType}`, '_blank')
+  window.open(dlUrl(`/api/export/download/pt/${taskId}/${modelType}`), '_blank')
 }
 function downloadExported(exportId: number) {
-  window.open(`/api/export/download/exported/${exportId}`, '_blank')
+  window.open(dlUrl(`/api/export/download/exported/${exportId}`), '_blank')
 }
 </script>

@@ -304,7 +304,7 @@ interface Det {
 }
 interface Rec { id:number; filename:string; num_detections:number; inference_time:number; detections:Det[]; original_url:string; overlay_url:string; overlay_morph_url?:string|null; mask_url:string; device:string; created_at:string|null; task_type?:string; source_image_id?:number; source_class_id?:number|null }
 
-interface DeviceInfo { id:string; name:string; available:boolean }
+interface DeviceInfo { id:string; name:string; available:boolean; backend?:string }
 
 const models = ref<ModelInfo[]>([])
 const devices = ref<DeviceInfo[]>([{id:'cpu',name:'CPU',available:true}])

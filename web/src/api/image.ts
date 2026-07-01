@@ -40,8 +40,11 @@ export const imageApi = {
     })
   },
 
-  getFileUrl: (imageId: number, thumb = false) =>
-    `/api/images/${imageId}/file${thumb ? '?thumb=true' : ''}`,
+  getFileUrl: (imageId: number, thumb = false) => {
+    // 图片经 <img src> 加载，浏览器不带 Authorization 头，鉴权用 ?token= 传（后端中间件已支持）
+    const t = localStorage.getItem('token') || ''
+    return `/api/images/${imageId}/file?token=${t}${thumb ? '&thumb=true' : ''}`
+  },
 
   updateStatus: (imageId: number, status: string, annotator?: string) =>
     api.put(`/images/${imageId}/status`, { status, annotator }),
