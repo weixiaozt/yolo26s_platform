@@ -61,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from './api/index'
@@ -71,14 +71,20 @@ const router = useRouter()
 const currentRoute = computed(() => route.path)
 const showSidebar = computed(() => route.name !== 'Annotator' && route.name !== 'Login' && route.name !== 'Inference')
 
-const currentUser = computed(() => {
+function readUser() {
   try { return JSON.parse(localStorage.getItem('user') || 'null') } catch { return null }
-})
+}
+// 用 ref 而非 computed：localStorage 不是响应式的，computed 登录后不会重算，
+// 会导致"用户管理"入口要刷新浏览器才出现。改为每次路由变化重新读（登录会跳路由 → 立即生效）。
+const currentUser = ref(readUser())
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
+
+watch(() => route.path, () => { currentUser.value = readUser() })
 
 function logout() {
   localStorage.removeItem('token')
   localStorage.removeItem('user')
+  currentUser.value = null
   router.push('/login')
 }
 
