@@ -32,9 +32,15 @@ from ..models.project import Project
 from ..models.defect_class import DefectClass
 from ..models.image import Image
 from ..models.annotation import Annotation
+from ..models.train_task import TrainTask, TrainEpochLog
 
 # 单个 ZIP 内文件解压后大小上限（防 zip bomb），200MB 远超任何真实工业图
 _MAX_ENTRY_SIZE = 200 * 1024 * 1024
+_MAX_WEIGHT_SIZE = 2 * 1024 * 1024 * 1024
+_VALID_TASK_TYPES = {"seg", "det", "cls", "obb"}
+_VALID_PROJECT_STATUSES = {"active", "archived"}
+_VALID_IMAGE_STATUSES = {"unlabeled", "labeling", "labeled", "reviewed"}
+_VALID_TASK_STATUSES = {"pending", "preparing", "training", "exporting", "completed", "failed", "cancelled"}
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -144,6 +150,173 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
     }
 
 
+def export_full_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
+    """导出完整项目迁移包。
+
+    包含全部项目图片、标注、项目配置、训练任务记录、epoch 日志，以及存在的
+    best.pt / last.pt。刻意不导出训练生成的 dataset/、推理结果和导出模型，
+    这些要么可重建，要么体积过大。
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ValueError(f"项目 {project_id} 不存在")
+
+    defect_classes = (
+        db.query(DefectClass)
+        .filter(DefectClass.project_id == project_id)
+        .order_by(DefectClass.class_index)
+        .all()
+    )
+    class_id_to_index = {dc.id: dc.class_index for dc in defect_classes}
+    images = db.query(Image).filter(Image.project_id == project_id).order_by(Image.id).all()
+    tasks = db.query(TrainTask).filter(TrainTask.project_id == project_id).order_by(TrainTask.id).all()
+
+    project_data = {
+        "name": project.name,
+        "description": project.description,
+        "task_type": project.task_type,
+        "resize_h": project.resize_h,
+        "resize_w": project.resize_w,
+        "crop_size": project.crop_size,
+        "overlap": project.overlap,
+        "status": project.status,
+        "last_train_config": project.last_train_config,
+        "defect_classes": [
+            {"class_index": dc.class_index, "name": dc.name, "color": dc.color}
+            for dc in defect_classes
+        ],
+        "exported_at": datetime.now().isoformat(),
+        "source_project_id": project_id,
+    }
+    manifest = {
+        "package_type": "full_project",
+        "version": 1,
+        "created_at": datetime.now().isoformat(),
+    }
+
+    images_data = []
+    annotations_data = []
+    train_tasks_data = []
+    epoch_logs_data = []
+    missing_files = []
+    exported_weights = 0
+    upload_root = settings.upload_path
+
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for img in images:
+            src_path = upload_root / img.file_path
+            if not src_path.exists():
+                missing_files.append(img.file_path)
+                continue
+
+            zip_img_name = Path(img.file_path).name
+            content_hash = img.content_hash or _sha256_file(src_path)
+            images_data.append({
+                "old_id": img.id,
+                "zip_filename": zip_img_name,
+                "original_filename": img.filename,
+                "width": img.width,
+                "height": img.height,
+                "file_size": img.file_size,
+                "status": img.status,
+                "annotator": img.annotator,
+                "reviewer": img.reviewer,
+                "class_index": class_id_to_index.get(img.class_id) if img.class_id else None,
+                "content_hash": content_hash,
+                "created_at": img.created_at.isoformat() if img.created_at else None,
+            })
+            zf.write(str(src_path), f"images/{zip_img_name}")
+
+            for ann in img.annotations:
+                ci = class_id_to_index.get(ann.class_id)
+                if ci is None:
+                    continue
+                annotations_data.append({
+                    "old_id": ann.id,
+                    "image_old_id": img.id,
+                    "image_zip_filename": zip_img_name,
+                    "class_index": ci,
+                    "polygon": ann.polygon,
+                    "area": ann.area,
+                    "bbox": ann.bbox,
+                    "created_by": ann.created_by,
+                    "created_at": ann.created_at.isoformat() if ann.created_at else None,
+                    "updated_at": ann.updated_at.isoformat() if ann.updated_at else None,
+                })
+
+        for task in tasks:
+            weight_files = {}
+            for key, path_str in (("best", task.best_model_path), ("last", task.last_model_path)):
+                if not path_str:
+                    continue
+                p = Path(path_str)
+                if not p.exists() or not p.is_file():
+                    continue
+                arc = f"weights/task_{task.id}/{key}.pt"
+                try:
+                    zf.write(str(p), arc)
+                except OSError:
+                    missing_files.append(path_str)
+                    continue
+                weight_files[key] = arc
+                exported_weights += 1
+
+            train_tasks_data.append({
+                "old_id": task.id,
+                "task_name": task.task_name,
+                "status": task.status,
+                "config": task.config,
+                "epochs": task.epochs,
+                "current_epoch": task.current_epoch,
+                "best_map50": task.best_map50,
+                "best_fitness": task.best_fitness,
+                "error_message": task.error_message,
+                "created_at": task.created_at.isoformat() if task.created_at else None,
+                "started_at": task.started_at.isoformat() if task.started_at else None,
+                "finished_at": task.finished_at.isoformat() if task.finished_at else None,
+                "weights": weight_files,
+            })
+
+            for log in task.epoch_logs:
+                epoch_logs_data.append({
+                    "task_old_id": task.id,
+                    "epoch": log.epoch,
+                    "train_box_loss": log.train_box_loss,
+                    "train_seg_loss": log.train_seg_loss,
+                    "train_cls_loss": log.train_cls_loss,
+                    "train_dfl_loss": log.train_dfl_loss,
+                    "val_box_loss": log.val_box_loss,
+                    "val_seg_loss": log.val_seg_loss,
+                    "val_cls_loss": log.val_cls_loss,
+                    "val_dfl_loss": log.val_dfl_loss,
+                    "precision_b": log.precision_b,
+                    "recall_b": log.recall_b,
+                    "map50_b": log.map50_b,
+                    "map50_95_b": log.map50_95_b,
+                    "map50_m": log.map50_m,
+                    "map50_95_m": log.map50_95_m,
+                    "top1_acc": log.top1_acc,
+                    "top5_acc": log.top5_acc,
+                    "lr": log.lr,
+                })
+
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        zf.writestr("project.json", json.dumps(project_data, ensure_ascii=False, indent=2))
+        zf.writestr("images.json", json.dumps(images_data, ensure_ascii=False, indent=2))
+        zf.writestr("annotations.json", json.dumps(annotations_data, ensure_ascii=False, indent=2))
+        zf.writestr("train_tasks.json", json.dumps(train_tasks_data, ensure_ascii=False, indent=2))
+        zf.writestr("epoch_logs.json", json.dumps(epoch_logs_data, ensure_ascii=False, indent=2))
+
+    return {
+        "image_count": len(images_data),
+        "annotation_count": len(annotations_data),
+        "train_task_count": len(train_tasks_data),
+        "weight_file_count": exported_weights,
+        "missing_files": missing_files,
+        "zip_size": out_path.stat().st_size,
+    }
+
+
 def _resolve_project_name(db: Session, base_name: str) -> str:
     """项目重名时自动加后缀。"""
     existing = {p.name for p in db.query(Project.name).all()}
@@ -157,6 +330,239 @@ def _resolve_project_name(db: Session, base_name: str) -> str:
     while f"{candidate}_{i}" in existing:
         i += 1
     return f"{candidate}_{i}"
+
+
+def _parse_dt(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def import_full_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
+    """从完整项目迁移包导入新项目。"""
+    with zipfile.ZipFile(zip_file) as zf:
+        required = {
+            "manifest.json", "project.json", "images.json", "annotations.json",
+            "train_tasks.json", "epoch_logs.json",
+        }
+        names = set(zf.namelist())
+        if not required.issubset(names):
+            missing = required - names
+            raise ValueError(f"ZIP 缺少完整项目包必要文件: {missing}")
+
+        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        if manifest.get("package_type") != "full_project":
+            raise ValueError("这不是完整项目包，请使用“导出项目”生成的 ZIP")
+
+        project_data = json.loads(zf.read("project.json").decode("utf-8"))
+        images_data = json.loads(zf.read("images.json").decode("utf-8"))
+        annotations_data = json.loads(zf.read("annotations.json").decode("utf-8"))
+        train_tasks_data = json.loads(zf.read("train_tasks.json").decode("utf-8"))
+        epoch_logs_data = json.loads(zf.read("epoch_logs.json").decode("utf-8"))
+
+        final_name = _resolve_project_name(db, project_data["name"])
+        project = Project(
+            name=final_name,
+            description=project_data.get("description"),
+            task_type=project_data.get("task_type") if project_data.get("task_type") in _VALID_TASK_TYPES else "seg",
+            resize_h=project_data.get("resize_h", 2048),
+            resize_w=project_data.get("resize_w", 2048),
+            crop_size=project_data.get("crop_size", 640),
+            overlap=project_data.get("overlap", 0.2),
+            status=project_data.get("status") if project_data.get("status") in _VALID_PROJECT_STATUSES else "active",
+            last_train_config=project_data.get("last_train_config"),
+        )
+        db.add(project)
+        db.flush()
+
+        class_index_to_id: dict[int, int] = {}
+        for cls in project_data.get("defect_classes", []):
+            dc = DefectClass(
+                project_id=project.id,
+                class_index=cls["class_index"],
+                name=cls["name"],
+                color=cls.get("color", "#FF0000"),
+            )
+            db.add(dc)
+            db.flush()
+            class_index_to_id[dc.class_index] = dc.id
+
+        upload_dir = settings.upload_path / str(project.id)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        upload_dir_resolved = upload_dir.resolve()
+
+        old_image_id_to_new_id: dict[int, int] = {}
+        zip_name_to_image_id: dict[str, int] = {}
+        imported_images = 0
+        for img_info in images_data:
+            zip_name = img_info.get("zip_filename")
+            safe_name = Path(zip_name or "").name
+            if not safe_name or safe_name in (".", ".."):
+                continue
+            zip_path_in_archive = f"images/{safe_name}"
+            if zip_path_in_archive not in names:
+                continue
+            try:
+                info = zf.getinfo(zip_path_in_archive)
+                if info.file_size > _MAX_ENTRY_SIZE:
+                    continue
+            except KeyError:
+                continue
+
+            new_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+            target_path = upload_dir / new_name
+            if not target_path.resolve().is_relative_to(upload_dir_resolved):
+                continue
+            with zf.open(zip_path_in_archive) as src, open(target_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+            cls_idx = img_info.get("class_index")
+            image = Image(
+                project_id=project.id,
+                filename=img_info.get("original_filename", safe_name),
+                file_path=f"{project.id}/{new_name}",
+                width=img_info.get("width", 0),
+                height=img_info.get("height", 0),
+                file_size=target_path.stat().st_size,
+                status=img_info.get("status") if img_info.get("status") in _VALID_IMAGE_STATUSES else "unlabeled",
+                annotator=img_info.get("annotator"),
+                reviewer=img_info.get("reviewer"),
+                class_id=class_index_to_id.get(cls_idx) if cls_idx is not None else None,
+                content_hash=img_info.get("content_hash") or _sha256_file(target_path),
+                created_at=_parse_dt(img_info.get("created_at")) or datetime.now(),
+            )
+            db.add(image)
+            db.flush()
+            if img_info.get("old_id") is not None:
+                old_image_id_to_new_id[int(img_info["old_id"])] = image.id
+            zip_name_to_image_id[safe_name] = image.id
+            imported_images += 1
+
+        imported_anns = 0
+        for ann in annotations_data:
+            img_id = None
+            if ann.get("image_old_id") is not None:
+                img_id = old_image_id_to_new_id.get(int(ann["image_old_id"]))
+            if img_id is None:
+                img_id = zip_name_to_image_id.get(Path(ann.get("image_zip_filename", "")).name)
+            cls_id = class_index_to_id.get(ann.get("class_index"))
+            if img_id is None or cls_id is None:
+                continue
+            a = Annotation(
+                image_id=img_id,
+                class_id=cls_id,
+                polygon=ann["polygon"],
+                area=ann.get("area"),
+                bbox=ann.get("bbox"),
+                created_by=ann.get("created_by"),
+                created_at=_parse_dt(ann.get("created_at")) or datetime.now(),
+                updated_at=_parse_dt(ann.get("updated_at")) or datetime.now(),
+            )
+            db.add(a)
+            imported_anns += 1
+
+        old_task_id_to_new_id: dict[int, int] = {}
+        imported_tasks = 0
+        imported_weights = 0
+        active_states = {"pending", "preparing", "training", "exporting"}
+        for task_info in train_tasks_data:
+            old_status = task_info.get("status", "completed")
+            if old_status not in _VALID_TASK_STATUSES:
+                old_status = "completed"
+            status = "cancelled" if old_status in active_states else old_status
+            task = TrainTask(
+                project_id=project.id,
+                task_name=task_info.get("task_name", "导入训练任务"),
+                status=status,
+                celery_task_id=None,
+                config=task_info.get("config"),
+                epochs=task_info.get("epochs", 0),
+                current_epoch=task_info.get("current_epoch", 0),
+                best_map50=task_info.get("best_map50"),
+                best_fitness=task_info.get("best_fitness"),
+                error_message=task_info.get("error_message"),
+                created_at=_parse_dt(task_info.get("created_at")) or datetime.now(),
+                started_at=_parse_dt(task_info.get("started_at")),
+                finished_at=_parse_dt(task_info.get("finished_at")),
+            )
+            if old_status in active_states:
+                task.error_message = (task.error_message or "") + "\n[导入提示] 原任务导出时仍处于活跃状态，导入后标记为 cancelled。"
+                task.finished_at = task.finished_at or datetime.now()
+            db.add(task)
+            db.flush()
+            imported_tasks += 1
+            if task_info.get("old_id") is not None:
+                old_task_id_to_new_id[int(task_info["old_id"])] = task.id
+
+            run_dir = settings.runs_path / f"task_{task.id}"
+            weights_dir = run_dir / "runs" / "train" / "weights"
+            weights_dir.mkdir(parents=True, exist_ok=True)
+            task.output_dir = str(run_dir)
+
+            weights = task_info.get("weights") or {}
+            for key, arc in (("best", weights.get("best")), ("last", weights.get("last"))):
+                if not arc or arc not in names:
+                    continue
+                try:
+                    info = zf.getinfo(arc)
+                    if info.file_size > _MAX_WEIGHT_SIZE:
+                        continue
+                except KeyError:
+                    continue
+                target = weights_dir / f"{key}.pt"
+                with zf.open(arc) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                if key == "best":
+                    task.best_model_path = str(target)
+                else:
+                    task.last_model_path = str(target)
+                imported_weights += 1
+
+        imported_logs = 0
+        for log_info in epoch_logs_data:
+            old_task_id = log_info.get("task_old_id")
+            if old_task_id is None:
+                continue
+            task_id = old_task_id_to_new_id.get(int(old_task_id))
+            if task_id is None:
+                continue
+            db.add(TrainEpochLog(
+                task_id=task_id,
+                epoch=log_info.get("epoch", 0),
+                train_box_loss=log_info.get("train_box_loss"),
+                train_seg_loss=log_info.get("train_seg_loss"),
+                train_cls_loss=log_info.get("train_cls_loss"),
+                train_dfl_loss=log_info.get("train_dfl_loss"),
+                val_box_loss=log_info.get("val_box_loss"),
+                val_seg_loss=log_info.get("val_seg_loss"),
+                val_cls_loss=log_info.get("val_cls_loss"),
+                val_dfl_loss=log_info.get("val_dfl_loss"),
+                precision_b=log_info.get("precision_b"),
+                recall_b=log_info.get("recall_b"),
+                map50_b=log_info.get("map50_b"),
+                map50_95_b=log_info.get("map50_95_b"),
+                map50_m=log_info.get("map50_m"),
+                map50_95_m=log_info.get("map50_95_m"),
+                top1_acc=log_info.get("top1_acc"),
+                top5_acc=log_info.get("top5_acc"),
+                lr=log_info.get("lr"),
+            ))
+            imported_logs += 1
+
+        db.commit()
+        return {
+            "project_id": project.id,
+            "project_name": final_name,
+            "renamed": final_name != project_data["name"],
+            "image_count": imported_images,
+            "annotation_count": imported_anns,
+            "train_task_count": imported_tasks,
+            "epoch_log_count": imported_logs,
+            "weight_file_count": imported_weights,
+        }
 
 
 def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:

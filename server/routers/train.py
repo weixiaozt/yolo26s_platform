@@ -104,7 +104,13 @@ def get_epoch_logs(task_id: int, db: Session = Depends(get_db)):
 
 @router.post("/train/tasks/{task_id}/cancel")
 def cancel_train_task(task_id: int, db: Session = Depends(get_db)):
-    """取消训练任务"""
+    """友好取消训练任务。
+
+    不 terminate Celery 进程，只把任务标记为 cancelled。
+    core/train.py 中的 cancel_check 回调会在 epoch/batch 边界检测到状态变化，
+    设置 trainer.stop=True，让 Ultralytics 自行收尾并保留 best.pt / last.pt。
+    强制 revoke 只保留在删除任务的兜底路径中，避免中断权重写盘。
+    """
     task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -112,18 +118,12 @@ def cancel_train_task(task_id: int, db: Session = Depends(get_db)):
     if task.status in ("completed", "failed", "cancelled"):
         raise HTTPException(status_code=400, detail=f"任务已处于终态: {task.status}")
 
-    # 撤销 Celery 任务
-    if task.celery_task_id:
-        from ..tasks import celery_app
-        celery_app.control.revoke(task.celery_task_id, terminate=True)
-
     task.status = "cancelled"
-    # 覆盖 finished_at 为本次 cancel 时间；上一次跑剩的旧值会让前端按
-    # (旧finished_at - 新started_at) 算出负耗时（复跑场景）。
-    from datetime import datetime as _dt
-    task.finished_at = _dt.now()
+    # 不立即写 finished_at：训练线程会检测 cancelled 并在收尾后写入真实结束时间。
+    # 这样前端计时不会在 trainer 仍在保存 best/last 时提前停止。
+    task.finished_at = None
     db.commit()
-    return {"ok": True, "message": "任务已取消"}
+    return {"ok": True, "message": "已请求友好取消，训练将在最近检查点停止"}
 
 
 @router.delete("/train/tasks/{task_id}", status_code=204)

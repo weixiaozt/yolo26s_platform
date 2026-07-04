@@ -199,6 +199,7 @@ def run_train(
     weight_decay: float = 0.0005,
     warmup_epochs: float = 3.0,
     warmup_momentum: float = 0.8,
+    workers: int = 4,
     # ---- 回调 ----
     epoch_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     progress_callback: Optional[Callable] = None,
@@ -243,10 +244,24 @@ def run_train(
     Returns:
         训练结果字典
     """
+    import torch
     from ultralytics import YOLO
 
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # RTX 30/40-series Tensor Cores are much faster with TF32 for float32 ops.
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+    except Exception as e:
+        print(f"[train speed] TF32 setup skipped: {e}")
+
+    try:
+        workers = max(0, int(workers))
+    except (TypeError, ValueError):
+        workers = 4
 
     # ---- 任务类型自动适配 ----
     is_det = (task_type == "det")
@@ -452,7 +467,7 @@ def run_train(
         batch=batch_size,
         patience=patience,
         device=device,
-        workers=0,
+        workers=workers,
         cache="ram",
         # 数据增广
         hsv_h=augment_hsv_h,

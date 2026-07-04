@@ -56,6 +56,23 @@ export interface MergeReport {
   dry_run: boolean
 }
 
+type DownloadProgressHandler = (percent: number) => void
+
+function downloadProgressConfig(onProgress?: DownloadProgressHandler) {
+  return {
+    responseType: 'blob' as const,
+    timeout: 600000,
+    onDownloadProgress: (evt: any) => {
+      if (!onProgress) return
+      if (evt.total) {
+        onProgress(Math.min(99, Math.round((evt.loaded / evt.total) * 100)))
+      } else if (evt.loaded > 0) {
+        onProgress(8)
+      }
+    },
+  }
+}
+
 export const projectApi = {
   list: () =>
     api.get<Project[]>('/projects'),
@@ -81,14 +98,36 @@ export const projectApi = {
   deleteClass: (projectId: number, classId: number) =>
     api.delete(`/projects/${projectId}/classes/${classId}`),
 
-  exportPackage: (id: number) =>
-    api.get(`/projects/${id}/export-package`, { responseType: 'blob' }),
+  exportPackage: (id: number, onProgress?: DownloadProgressHandler) =>
+    api.get(`/projects/${id}/export-package`, downloadProgressConfig(onProgress)),
+
+  exportFullPackage: (id: number, onProgress?: DownloadProgressHandler) =>
+    api.get(`/projects/${id}/export-full-package`, downloadProgressConfig(onProgress)),
 
   importPackage: (file: File) => {
     const fd = new FormData()
     fd.append('file', file)
     return api.post<{ project_id: number; project_name: string; renamed: boolean; image_count: number; annotation_count: number }>(
       '/projects/import-package',
+      fd,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000 }
+    )
+  },
+
+  importFullPackage: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<{
+      project_id: number
+      project_name: string
+      renamed: boolean
+      image_count: number
+      annotation_count: number
+      train_task_count: number
+      epoch_log_count: number
+      weight_file_count: number
+    }>(
+      '/projects/import-full-package',
       fd,
       { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000 }
     )

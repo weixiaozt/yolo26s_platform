@@ -10,60 +10,39 @@
           <el-radio-button label="grid">网格</el-radio-button>
         </el-radio-group>
       </div>
-      <div class="top-controls">
-        <el-select v-model="selModelIdx" placeholder="选择模型" style="width:240px" size="small">
-          <el-option v-for="(m,i) in models" :key="i" :label="m.label" :value="i" />
-        </el-select>
-        <el-select v-model="device" style="width:280px" size="small">
-          <el-option v-for="d in devices" :key="`${d.backend||''}:${d.id}`" :label="d.name" :value="d.id" :disabled="!d.available" />
-        </el-select>
-        <span class="p-label">置信度</span>
-        <el-input-number v-model="conf" :min="0.01" :max="0.99" :step="0.05" :precision="2" size="small" style="width:96px" />
-        <span class="p-label">IoU</span>
-        <el-input-number v-model="iou" :min="0.1" :max="0.95" :step="0.05" :precision="2" size="small" style="width:96px" />
-        <span class="p-label">长边缩放</span>
-        <el-input-number v-model="resizeSize" :min="0" :max="8192" :step="256" size="small" style="width:96px" />
-        <el-tooltip content="0=不缩放，等比缩放长边到指定尺寸" placement="bottom">
-          <el-icon style="color:#aaa;cursor:help"><QuestionFilled /></el-icon>
-        </el-tooltip>
-
-        <!-- 选图（不自动推理） -->
-        <el-upload :auto-upload="false" :show-file-list="false" :on-change="onSelectFile" accept=".bmp,.png,.jpg,.jpeg,.tif,.tiff" multiple>
-          <el-button class="hbtn hbtn--cyan" size="small"><el-icon><Plus /></el-icon> 选图</el-button>
-        </el-upload>
-
-        <!-- 开始推理 / 清空队列 -->
-        <el-button v-if="pending.length>0" class="hbtn hbtn--blue" :loading="inferring" size="small" @click="runPending">
-          <el-icon><VideoPlay /></el-icon> 开始推理 ({{ pending.length }})
-        </el-button>
-        <el-button v-if="pending.length>0" class="hbtn hbtn--gray" size="small" @click="clearPending">清空队列</el-button>
-
-        <!-- 一键推理训练图 -->
-        <el-button class="hbtn hbtn--green" size="small" @click="showProjectImagesDialog=true" :disabled="!selModel">
-          <el-icon><DataLine /></el-icon> 推理训练图
-        </el-button>
-
-        <!-- 切割小图（仅 seg 项目） -->
-        <el-button v-if="projectTaskType==='seg'" class="hbtn hbtn--orange" size="small"
-          :disabled="history.length===0 || cropping" :loading="cropping"
-          @click="cropDefects">
-          <el-icon><Scissor /></el-icon> 切割小图
-        </el-button>
-      </div>
     </div>
 
-    <!-- 待推理队列条（仅有时显示） -->
-    <div v-if="pending.length>0" class="pending-bar">
-      <span class="pending-label">待推理 {{ pending.length }} 张：</span>
-      <div class="pending-thumbs">
-        <div v-for="(p,i) in pending" :key="i" class="pending-item" :title="p.file.name">
-          <img :src="p.url" />
-          <div class="pending-name">{{ p.file.name }}</div>
-          <el-button text size="small" class="pending-del" @click="removePending(i)">
-            <el-icon><Close /></el-icon>
-          </el-button>
+    <div v-if="inferring" class="infer-progress-panel">
+      <div class="infer-progress-main">
+        <el-icon class="is-loading progress-icon"><Loading /></el-icon>
+        <div class="infer-progress-text">
+          <div class="infer-progress-title">正在推理 {{ inferDone }} / {{ inferTotal }}</div>
+          <div class="infer-progress-sub">{{ inferMsg || '准备推理...' }}</div>
         </div>
       </div>
+      <el-progress
+        class="infer-progress-bar"
+        :percentage="inferPercent"
+        :stroke-width="8"
+        :show-text="false"
+      />
+      <el-button size="small" type="danger" plain @click="cancelInfer">停止本次推理</el-button>
+    </div>
+
+    <div v-if="cropping" class="crop-progress-panel">
+      <div class="infer-progress-main">
+        <el-icon class="is-loading progress-icon crop-icon"><Scissor /></el-icon>
+        <div class="infer-progress-text">
+          <div class="infer-progress-title">正在切割缺陷小图</div>
+          <div class="infer-progress-sub">{{ cropMsg }}</div>
+        </div>
+      </div>
+      <el-progress
+        class="infer-progress-bar"
+        :percentage="cropProgress"
+        :stroke-width="8"
+        :show-text="false"
+      />
     </div>
 
     <div class="main-body">
@@ -71,11 +50,26 @@
       <template v-if="viewLayout==='list'">
         <div class="history-panel">
           <div class="hp-header">
-            <span>推断记录 ({{ history.length }})</span>
+            <span>推断记录 ({{ filteredHistory.length }}/{{ history.length }})</span>
             <el-button text size="small" type="danger" @click="clearHistory" :disabled="history.length===0">清空</el-button>
           </div>
+          <div class="hp-filter">
+            <el-radio-group v-model="historyFilter" size="small">
+              <el-radio-button label="all">全部</el-radio-button>
+              <el-radio-button label="defect">有缺陷</el-radio-button>
+              <el-radio-button label="ok">OK</el-radio-button>
+            </el-radio-group>
+          </div>
           <div class="hp-list">
-            <div v-for="r in history" :key="r.id" :class="['hp-item',{active:selId===r.id}]" @click="selectRecord(r)">
+            <div v-if="inferring" class="hp-item running">
+              <div class="hp-running-icon"><el-icon class="is-loading"><Loading /></el-icon></div>
+              <div class="hp-info">
+                <div class="hp-name">正在推理</div>
+                <div class="hp-status running-text">{{ inferDone }} / {{ inferTotal }}</div>
+                <div class="hp-meta">{{ inferMsg }}</div>
+              </div>
+            </div>
+            <div v-for="r in filteredHistory" :key="r.id" :class="['hp-item',{active:selId===r.id}]" @click="selectRecord(r)">
               <img :src="r.overlay_url || r.original_url" class="hp-thumb" loading="lazy" />
               <div class="hp-info">
                 <div class="hp-name">{{ r.filename }}</div>
@@ -89,7 +83,8 @@
               </div>
               <el-button text size="small" class="hp-del" @click.stop="delRecord(r.id)"><el-icon><Delete /></el-icon></el-button>
             </div>
-            <div v-if="history.length===0" class="hp-empty">暂无记录</div>
+            <div v-if="history.length===0 && !inferring" class="hp-empty">暂无记录</div>
+            <div v-else-if="filteredHistory.length===0 && !inferring" class="hp-empty">暂无匹配记录</div>
           </div>
         </div>
 
@@ -127,6 +122,7 @@
             </div>
             <div v-if="viewMode!=='compare'" class="img-container" ref="imgContainer"
                 @wheel.prevent="onWheel" @mousedown="onDragStart" @dblclick="resetZoom">
+              <div class="view-status-badge" :class="currentStatusClass">{{ currentStatusText }}</div>
               <img :src="currentSrc" class="zoom-img" :style="imgStyle" draggable="false" />
             </div>
             <div v-else class="compare-container">
@@ -139,7 +135,18 @@
             </div>
             <!-- 检测详情 -->
             <div v-if="!isCls && !isObb && current.detections.length>0" class="detail-bar">
-              <el-table :data="current.detections" stripe size="small" max-height="160" style="width:100%">
+              <div class="detail-header">
+                <div>
+                  <b>检测详情</b>
+                  <span>共 {{ current.detections.length }} 条</span>
+                </div>
+                <div class="detail-meta">
+                  <span>{{ current.inference_time }}s</span>
+                  <span>{{ current.device }}</span>
+                  <span :title="current.filename">{{ current.filename }}</span>
+                </div>
+              </div>
+              <el-table :data="current.detections" stripe size="small" style="width:100%">
                 <el-table-column type="index" label="#" width="45" />
                 <el-table-column label="类别" width="90"><template #default="{row}"><el-tag size="small">{{ row.class_name || ('C' + row.class_id) }}</el-tag></template></el-table-column>
                 <el-table-column label="置信度" width="80"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(1)}}%</b></template></el-table-column>
@@ -148,7 +155,18 @@
               </el-table>
             </div>
             <div v-else-if="isObb && current.detections.length>0" class="detail-bar">
-              <el-table :data="current.detections" stripe size="small" max-height="200" style="width:100%">
+              <div class="detail-header">
+                <div>
+                  <b>旋转框详情</b>
+                  <span>共 {{ current.detections.length }} 条</span>
+                </div>
+                <div class="detail-meta">
+                  <span>{{ current.inference_time }}s</span>
+                  <span>{{ current.device }}</span>
+                  <span :title="current.filename">{{ current.filename }}</span>
+                </div>
+              </div>
+              <el-table :data="current.detections" stripe size="small" style="width:100%">
                 <el-table-column type="index" label="#" width="45" />
                 <el-table-column label="类别" width="100"><template #default="{row}"><el-tag size="small">{{ row.class_name || ('C' + row.class_id) }}</el-tag></template></el-table-column>
                 <el-table-column label="置信度" width="80"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(1)}}%</b></template></el-table-column>
@@ -161,7 +179,18 @@
               </el-table>
             </div>
             <div v-else-if="isCls && current.detections.length>0" class="detail-bar">
-              <el-table :data="current.detections" stripe size="small" max-height="200" style="width:100%">
+              <div class="detail-header">
+                <div>
+                  <b>分类详情</b>
+                  <span>Top-{{ current.detections.length }}</span>
+                </div>
+                <div class="detail-meta">
+                  <span>{{ current.inference_time }}s</span>
+                  <span>{{ current.device }}</span>
+                  <span :title="current.filename">{{ current.filename }}</span>
+                </div>
+              </div>
+              <el-table :data="current.detections" stripe size="small" style="width:100%">
                 <el-table-column type="index" label="Rank" width="60"><template #default="{$index}">Top-{{ $index + 1 }}</template></el-table-column>
                 <el-table-column label="类别" width="120"><template #default="{row}"><el-tag size="small">{{ row.class_name || ('C' + row.class_id) }}</el-tag></template></el-table-column>
                 <el-table-column label="置信度" width="100"><template #default="{row}"><b :style="{color:row.confidence>0.5?'#67C23A':'#E6A23C'}">{{(row.confidence*100).toFixed(2)}}%</b></template></el-table-column>
@@ -224,6 +253,94 @@
           </div>
         </div>
       </template>
+
+      <aside class="inspector-panel">
+        <section class="inspector-section">
+          <div class="section-title">推理参数</div>
+          <div class="param-stack">
+            <label>模型</label>
+            <el-select v-model="selModelIdx" placeholder="选择模型" size="small">
+              <el-option v-for="(m,i) in models" :key="i" :label="m.label" :value="i" />
+            </el-select>
+          </div>
+          <div class="param-stack">
+            <label>推理设备</label>
+            <el-select v-model="device" size="small">
+              <el-option v-for="d in devices" :key="`${d.backend||''}:${d.id}`" :label="d.name" :value="d.id" :disabled="!d.available" />
+            </el-select>
+          </div>
+          <div class="param-row">
+            <span>置信度</span>
+            <el-input-number v-model="conf" :min="0.01" :max="0.99" :step="0.05" :precision="2" size="small" controls-position="right" />
+          </div>
+          <div class="param-row">
+            <span>IoU</span>
+            <el-input-number v-model="iou" :min="0.1" :max="0.95" :step="0.05" :precision="2" size="small" controls-position="right" />
+          </div>
+          <div class="param-row">
+            <span>长边缩放</span>
+            <el-input-number v-model="resizeSize" :min="0" :max="8192" :step="256" size="small" controls-position="right" />
+          </div>
+          <div class="param-help">0 表示不缩放，按原图尺寸推理。</div>
+          <div class="param-actions">
+            <div class="action-cell action-cell--pick">
+              <el-upload :auto-upload="false" :show-file-list="false" :on-change="onSelectFile" accept=".bmp,.png,.jpg,.jpeg,.tif,.tiff" multiple>
+                <el-button class="hbtn hbtn--cyan panel-action-btn" size="small"><el-icon><Plus /></el-icon> 选图</el-button>
+              </el-upload>
+            </div>
+            <div class="action-cell action-cell--train">
+              <el-button class="hbtn hbtn--green panel-action-btn" size="small" @click="showProjectImagesDialog=true" :disabled="!selModel">
+                <el-icon><DataLine /></el-icon> 推理训练图
+              </el-button>
+            </div>
+            <div v-if="projectTaskType==='seg'" class="action-cell action-cell--crop">
+              <el-button class="hbtn hbtn--orange panel-action-btn" size="small"
+                :disabled="history.length===0 || cropping" :loading="cropping"
+                @click="cropDefects">
+                <el-icon><Scissor /></el-icon> 切割小图
+              </el-button>
+            </div>
+            <div v-if="pending.length>0" class="action-cell action-cell--run">
+              <el-button class="hbtn hbtn--blue panel-action-btn" :loading="inferring" size="small" @click="runPending">
+                <el-icon><VideoPlay /></el-icon> 开始推理
+              </el-button>
+            </div>
+            <div v-if="pending.length>0" class="action-cell action-cell--clear">
+              <el-button class="hbtn hbtn--gray panel-action-btn" size="small" @click="clearPending">清空队列</el-button>
+            </div>
+          </div>
+        </section>
+
+        <section class="inspector-section queue-section">
+          <div class="section-title queue-title">
+            <span>待推理队列</span>
+            <b>{{ pending.length }} 张</b>
+            <el-button v-if="!inferring" text size="small" type="danger" @click="clearPending">清空</el-button>
+          </div>
+          <div v-if="inferring" class="queue-running">
+            <span class="queue-dot"></span>
+            <span>剩余 {{ Math.max(pending.length - inferDone, 0) }} / {{ pending.length }}</span>
+          </div>
+          <div v-if="pending.length>0" class="side-queue-list">
+            <div v-for="(p,i) in visiblePending" :key="i" class="side-queue-item" :title="p.file.name">
+              <img :src="p.url" />
+              <span>{{ p.file.name }}</span>
+              <el-button v-if="!inferring" text size="small" class="side-queue-del" @click="removePending(i)">
+                <el-icon><Close /></el-icon>
+              </el-button>
+            </div>
+          </div>
+          <el-button
+            v-if="pending.length > 10"
+            text
+            class="queue-toggle"
+            @click="queueExpanded = !queueExpanded"
+          >
+            {{ queueExpanded ? '收起队列' : `展开全部 ${pending.length} 张` }}
+          </el-button>
+          <div v-else-if="pending.length===0" class="inspector-empty">暂无待推理图片</div>
+        </section>
+      </aside>
     </div>
 
     <!-- Lightbox -->
@@ -276,13 +393,6 @@
       </template>
     </el-dialog>
 
-    <!-- Loading -->
-    <div v-if="inferring" class="loading-overlay">
-      <el-icon class="is-loading" style="font-size:36px;color:#409EFF"><Loading /></el-icon>
-      <div style="color:#fff;margin-top:10px">{{ inferMsg }}</div>
-      <el-progress v-if="inferTotal>1" :percentage="Math.round(inferDone/inferTotal*100)" :stroke-width="6" style="width:300px;margin-top:14px" />
-      <el-button v-if="inferTotal>1" size="small" type="danger" @click="cancelInfer" style="margin-top:14px">取消</el-button>
-    </div>
   </div>
 </template>
 
@@ -317,6 +427,7 @@ const inferring = ref(false)
 const inferMsg = ref('')
 const inferTotal = ref(0)
 const inferDone = ref(0)
+const inferPercent = computed(() => inferTotal.value > 0 ? Math.round(inferDone.value / inferTotal.value * 100) : 0)
 let cancelFlag = false
 const viewMode = ref<'original'|'overlay'|'mask'|'compare'>('overlay')
 const showMorph = ref(false)
@@ -325,10 +436,19 @@ const viewLayout = ref<'list'|'grid'>('list')
 const history = ref<Rec[]>([])
 const selId = ref<number|null>(null)
 const current = computed(() => history.value.find(r => r.id === selId.value) || null)
+const currentIsAbnormal = computed(() => current.value ? isAbnormalRecord(current.value) : false)
+const currentStatusText = computed(() => {
+  if (!current.value) return ''
+  if (current.value.task_type === 'cls') return currentIsAbnormal.value ? '分类异常' : '分类正确'
+  return currentIsAbnormal.value ? `${current.value.num_detections} 个缺陷` : 'OK'
+})
+const currentStatusClass = computed(() => currentIsAbnormal.value ? 'danger' : 'ok')
 
 // 待推理队列：单一数据源，避免两个数组索引耦合
 interface PendingItem { file: File; url: string }
 const pending = ref<PendingItem[]>([])
+const queueExpanded = ref(false)
+const visiblePending = computed(() => queueExpanded.value ? pending.value : pending.value.slice(0, 10))
 
 // 项目类别（用于 cls GT 对照）+ 项目类型（决定"切割小图"按钮是否显示）
 const projectClasses = ref<Array<{class_index:number; name:string; color:string; id:number}>>([])
@@ -336,6 +456,8 @@ const projectTaskType = ref<string>('seg')
 
 // 切割小图状态
 const cropping = ref(false)
+const cropProgress = ref(0)
+const cropMsg = ref('正在准备推理结果与缺陷区域...')
 
 // 推理训练图 dialog
 const showProjectImagesDialog = ref(false)
@@ -347,6 +469,7 @@ const piSample = ref(true)
 const gridPage = ref(1)
 const gridPageSize = ref(40)
 const gridFilter = ref<'all'|'defect'|'ok'>('all')
+const historyFilter = ref<'all'|'defect'|'ok'>('all')
 
 // Lightbox
 const lightboxOpen = ref(false)
@@ -519,6 +642,7 @@ function removePending(i: number) {
 function clearPending() {
   pending.value.forEach(p => URL.revokeObjectURL(p.url))
   pending.value = []
+  queueExpanded.value = false
 }
 
 // ---- 推理 ----
@@ -616,12 +740,25 @@ async function cropDefects() {
   } catch { return }
 
   cropping.value = true
+  cropProgress.value = 8
+  cropMsg.value = '正在准备推理结果与缺陷区域...'
   try {
     const resp = await api.post('/inference/crop-defects', null, {
       params: { project_id: props.id },
       responseType: 'blob',
       timeout: 600000,
+      onDownloadProgress: (evt: any) => {
+        if (evt.total) {
+          cropProgress.value = Math.min(98, Math.max(12, Math.round((evt.loaded / evt.total) * 100)))
+          cropMsg.value = '正在下载切割结果 zip...'
+        } else if (evt.loaded > 0) {
+          cropProgress.value = Math.max(cropProgress.value, 35)
+          cropMsg.value = '正在接收切割结果 zip...'
+        }
+      },
     })
+    cropProgress.value = 100
+    cropMsg.value = '切割完成，正在保存 zip...'
     const blob = resp.data as Blob
     // 错误响应也是 blob，要先看 content-type 判断
     if (!blob.type.includes('zip')) {
@@ -649,7 +786,11 @@ async function cropDefects() {
     const msg = e?.response?.data?.detail || e?.message || '切割失败'
     ElMessage.error(typeof msg === 'string' ? msg : '切割失败')
   } finally {
-    cropping.value = false
+    window.setTimeout(() => {
+      cropping.value = false
+      cropProgress.value = 0
+      cropMsg.value = '正在准备推理结果与缺陷区域...'
+    }, 500)
   }
 }
 
@@ -691,6 +832,18 @@ const filteredGridItems = computed(() => {
     return r.num_detections === 0
   })
 })
+const filteredHistory = computed(() => filterRecords(history.value, historyFilter.value))
+function isAbnormalRecord(r: Rec): boolean {
+  if (r.task_type === 'cls') return r.source_class_id != null && !gtMatch(r)
+  return r.num_detections > 0
+}
+function filterRecords(arr: Rec[], mode: 'all'|'defect'|'ok'): Rec[] {
+  if (mode === 'all') return arr
+  if (mode === 'defect') {
+    return arr.filter(isAbnormalRecord)
+  }
+  return arr.filter(r => !isAbnormalRecord(r))
+}
 const pagedGridItems = computed(() => {
   const start = (gridPage.value - 1) * gridPageSize.value
   return filteredGridItems.value.slice(start, start + gridPageSize.value)
@@ -705,50 +858,310 @@ function openLightbox(r: Rec) { lightboxRec.value = r; lightboxOpen.value = true
 .infer-page { display:flex; flex-direction:column; height:100vh; background:#f0f2f5; }
 .top-bar { display:flex; justify-content:space-between; align-items:center; padding:6px 14px; background:#fff; border-bottom:1px solid #e4e7ed; flex-shrink:0; }
 .top-left { display:flex; align-items:center; gap:6px; }
-.top-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .p-label { font-size:12px; color:#909399; }
 
-/* 待推理队列条 */
-.pending-bar { display:flex; align-items:center; gap:10px; padding:8px 14px; background:#fffbe6; border-bottom:1px solid #faad14; flex-shrink:0; max-height:108px; overflow:hidden; }
-.pending-label { font-size:13px; color:#874d00; font-weight:600; flex-shrink:0; }
-.pending-thumbs { display:flex; gap:8px; overflow-x:auto; padding-bottom:4px; }
-.pending-item { position:relative; flex-shrink:0; width:80px; }
-.pending-item img { width:80px; height:80px; object-fit:cover; border-radius:4px; border:1px solid #faad14; }
-.pending-name { font-size:10px; color:#666; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.pending-del { position:absolute; right:0; top:0; padding:2px; background:rgba(255,255,255,.85); border-radius:0 4px 0 4px; }
+.queue-summary { display:flex; align-items:center; gap:9px; font-size:13px; color:#874d00; }
+.queue-dot { width:8px; height:8px; border-radius:50%; background:#faad14; box-shadow:0 0 0 4px rgba(250,173,20,.16); }
+
+.infer-progress-panel {
+  display:grid;
+  grid-template-columns:minmax(220px, 360px) minmax(220px, 1fr) auto;
+  align-items:center;
+  gap:14px;
+  padding:10px 16px;
+  background:#ffffff;
+  border-bottom:1px solid #d9e8ff;
+  box-shadow:0 8px 20px rgba(64,158,255,.08);
+  flex-shrink:0;
+}
+.crop-progress-panel {
+  display:grid;
+  grid-template-columns:minmax(220px, 360px) minmax(220px, 1fr);
+  align-items:center;
+  gap:14px;
+  padding:10px 16px;
+  background:#fffaf3;
+  border-bottom:1px solid #ffe0b2;
+  box-shadow:0 8px 20px rgba(245,151,58,.08);
+  flex-shrink:0;
+}
+.infer-progress-main { display:flex; align-items:center; gap:10px; min-width:0; }
+.progress-icon { font-size:22px; color:#409EFF; flex:0 0 auto; }
+.crop-icon { color:#f59e0b; }
+.infer-progress-text { min-width:0; }
+.infer-progress-title { color:#303133; font-size:13px; font-weight:700; }
+.infer-progress-sub { color:#909399; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.infer-progress-bar { width:100%; }
 
 .main-body { display:flex; flex:1; overflow:hidden; }
 
 /* 列表视图 */
 .history-panel { width:220px; background:#fff; border-right:1px solid #e4e7ed; display:flex; flex-direction:column; flex-shrink:0; }
 .hp-header { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; font-size:13px; font-weight:600; color:#303133; border-bottom:1px solid #eee; }
+.hp-filter { padding:8px 10px; border-bottom:1px solid #f1f3f6; background:#fafbfc; }
+.hp-filter :deep(.el-radio-group) { width:100%; display:grid; grid-template-columns:repeat(3, 1fr); }
+.hp-filter :deep(.el-radio-button__inner) { width:100%; padding:6px 0; font-size:12px; }
 .hp-list { flex:1; overflow-y:auto; }
 .hp-item { display:flex; gap:6px; padding:6px 8px; cursor:pointer; border-bottom:1px solid #f5f5f5; align-items:center; transition:background .15s; position:relative; }
 .hp-item:hover { background:#f5f7fa; }
 .hp-item.active { background:#ecf5ff; border-left:3px solid #409EFF; }
+.hp-item.running { cursor:default; background:#f5faff; border-left:3px solid #409EFF; }
+.hp-running-icon { width:44px; height:44px; border-radius:4px; background:#ecf5ff; color:#409EFF; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
 .hp-thumb { width:44px; height:44px; object-fit:cover; border-radius:4px; background:#eee; flex-shrink:0; }
 .hp-info { flex:1; min-width:0; }
 .hp-name { font-size:10px; color:#606266; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .hp-status { font-size:11px; font-weight:600; }
 .hp-status.defect { color:#F56C6C; }
 .hp-status.ok { color:#67C23A; }
+.running-text { color:#409EFF; }
 .hp-meta { font-size:10px; color:#c0c4cc; }
 .hp-del { position:absolute; right:4px; top:4px; opacity:0; transition:opacity .15s; }
 .hp-item:hover .hp-del { opacity:1; }
 .hp-empty { text-align:center; color:#c0c4cc; padding:40px 0; font-size:13px; }
 
-.viewer { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+.viewer { flex:1; display:flex; flex-direction:column; overflow:auto; }
 .view-bar { display:flex; justify-content:space-between; align-items:center; padding:8px 14px; background:#fff; border-bottom:1px solid #e4e7ed; flex-shrink:0; gap:12px; flex-wrap:wrap; }
 .view-stats { font-size:12px; color:#909399; }
 .cls-top1 { display:flex; align-items:center; font-size:13px; font-weight:600; color:#303133; }
-.img-container { flex:1; overflow:hidden; background:#111; display:flex; justify-content:center; align-items:center; user-select:none; }
+.img-container { position:relative; flex:1 0 360px; min-height:360px; overflow:hidden; background:#111; display:flex; justify-content:center; align-items:center; user-select:none; }
+.view-status-badge {
+  position:absolute;
+  top:12px;
+  right:12px;
+  z-index:2;
+  padding:6px 10px;
+  border-radius:999px;
+  color:#fff;
+  font-size:12px;
+  font-weight:700;
+  box-shadow:0 8px 18px rgba(0,0,0,.22);
+}
+.view-status-badge.ok { background:#16a34a; }
+.view-status-badge.danger { background:#dc2626; }
 .zoom-img { max-width:100%; max-height:100%; object-fit:contain; transform-origin:center center; transition:none; }
-.compare-container { flex:1; display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; background:#111; overflow:hidden; }
+.compare-container { flex:1 0 360px; min-height:360px; display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; background:#111; overflow:hidden; }
 .cmp-cell { display:flex; flex-direction:column; min-height:0; overflow:hidden; }
 .cmp-label { text-align:center; font-size:11px; color:#888; padding:4px 0; background:#1a1a1a; flex-shrink:0; }
 .cmp-img-wrap { flex:1; overflow:hidden; display:flex; justify-content:center; align-items:center; user-select:none; }
-.detail-bar { padding:6px 14px; background:#fff; border-top:1px solid #e4e7ed; flex-shrink:0; max-height:180px; overflow-y:auto; }
+.detail-bar { padding:10px 14px 12px; background:#fff; border-top:1px solid #e4e7ed; flex-shrink:0; overflow:visible; }
+.detail-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  margin-bottom:8px;
+  color:#303133;
+}
+.detail-header b {
+  font-size:13px;
+}
+.detail-header span {
+  color:#909399;
+  font-size:12px;
+  margin-left:8px;
+}
+.detail-meta {
+  min-width:0;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:12px;
+  color:#909399;
+  font-size:12px;
+}
+.detail-meta span {
+  min-width:0;
+  margin-left:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.detail-meta span:last-child {
+  max-width:360px;
+}
 .empty-state { flex:1; display:flex; justify-content:center; align-items:center; }
+
+.inspector-panel {
+  width:286px;
+  flex:0 0 286px;
+  display:flex;
+  flex-direction:column;
+  background:#f8fafc;
+  border-left:1px solid #dfe6ef;
+  padding:12px;
+  overflow-y:auto;
+}
+.inspector-section {
+  background:#fff;
+  border:1px solid #e6ebf2;
+  border-radius:8px;
+  padding:12px;
+  margin-bottom:12px;
+}
+.section-title {
+  color:#303133;
+  font-size:13px;
+  font-weight:700;
+  margin-bottom:10px;
+}
+.param-row {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:10px;
+  font-size:12px;
+  color:#606266;
+}
+.param-row .el-input-number {
+  width:122px;
+}
+.param-stack {
+  display:grid;
+  gap:6px;
+  margin-bottom:10px;
+}
+.param-stack label {
+  color:#606266;
+  font-size:12px;
+}
+.param-help {
+  color:#a8abb2;
+  font-size:11px;
+  line-height:1.4;
+}
+.param-actions {
+  display:grid;
+  grid-template-columns:72px minmax(0, 1fr);
+  gap:8px;
+  margin-top:12px;
+  align-items:stretch;
+}
+.action-cell {
+  min-width:0;
+  height:36px;
+}
+.action-cell--crop,
+.action-cell--run {
+  grid-column:1 / -1;
+}
+.param-actions :deep(.el-button.panel-action-btn.el-button--small) {
+  display:inline-flex;
+  width:100%;
+  max-width:100%;
+  min-width:0;
+  height:36px;
+  margin:0;
+  padding:0 6px;
+  border-radius:8px;
+  font-size:12px;
+  line-height:36px;
+  white-space:nowrap;
+  transform:none;
+}
+.param-actions :deep(.el-button.panel-action-btn.el-button--small > span) {
+  min-width:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:3px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.param-actions :deep(.el-button.panel-action-btn.el-button--small:hover),
+.param-actions :deep(.el-button.panel-action-btn.el-button--small:focus),
+.param-actions :deep(.el-button.panel-action-btn.el-button--small:active) {
+  transform:none;
+}
+.panel-action-btn {
+  justify-content:center;
+}
+.param-actions :deep(.el-upload) {
+  display:block;
+  width:100%;
+  height:36px;
+}
+.param-actions :deep(.el-upload-list) {
+  display:none;
+}
+.inspector-empty {
+  color:#a8abb2;
+  font-size:12px;
+  text-align:center;
+  padding:8px 0;
+}
+.queue-title {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+.queue-title b {
+  margin-left:auto;
+  color:#409EFF;
+  font-size:12px;
+}
+.queue-section {
+  display:flex;
+  flex-direction:column;
+  flex:1;
+  min-height:420px;
+}
+.queue-running {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  padding:8px 10px;
+  margin-bottom:8px;
+  border-radius:6px;
+  background:#fff8e6;
+  color:#874d00;
+  font-size:12px;
+  font-weight:600;
+}
+.side-queue-list {
+  display:grid;
+  gap:8px;
+  align-content:start;
+  overflow-y:auto;
+  padding-right:2px;
+}
+.side-queue-item {
+  display:grid;
+  grid-template-columns:52px minmax(0, 1fr) 26px;
+  align-items:center;
+  gap:10px;
+  min-height:64px;
+  padding:8px;
+  border:1px solid #edf0f5;
+  border-radius:8px;
+  background:#fafbfc;
+}
+.side-queue-item img {
+  width:52px;
+  height:52px;
+  object-fit:cover;
+  border-radius:6px;
+  background:#edf0f5;
+}
+.side-queue-item span {
+  min-width:0;
+  color:#606266;
+  font-size:12px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.side-queue-del {
+  padding:2px;
+  min-height:26px;
+}
+.queue-toggle {
+  align-self:center;
+  margin-top:10px;
+  font-size:12px;
+}
 
 /* 网格视图 */
 .grid-view { flex:1; display:flex; flex-direction:column; overflow:hidden; background:#fff; }
@@ -773,5 +1186,34 @@ function openLightbox(r: Rec) { lightboxRec.value = r; lightboxOpen.value = true
 .lightbox-img { max-width:100%; max-height:80vh; object-fit:contain; }
 .lightbox-meta { width:240px; padding:10px; background:#fafafa; border-radius:6px; font-size:13px; color:#303133; }
 
-.loading-overlay { position:fixed; top:0; left:0; right:0; bottom:0; z-index:9999; background:rgba(0,0,0,.55); display:flex; flex-direction:column; justify-content:center; align-items:center; }
+@media (max-width: 1100px) {
+  .top-bar { align-items:flex-start; flex-direction:column; gap:8px; }
+  .inspector-panel {
+    width:260px;
+    flex-basis:260px;
+  }
+  .infer-progress-panel {
+    grid-template-columns:1fr auto;
+  }
+  .crop-progress-panel {
+    grid-template-columns:1fr;
+  }
+  .infer-progress-bar {
+    grid-column:1 / -1;
+    order:3;
+  }
+}
+@media (max-width: 980px) {
+  .main-body {
+    flex-direction:column;
+  }
+  .history-panel,
+  .inspector-panel {
+    width:100%;
+    flex:0 0 auto;
+    max-height:220px;
+    border-left:none;
+    border-top:1px solid #dfe6ef;
+  }
+}
 </style>

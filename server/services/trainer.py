@@ -156,6 +156,7 @@ class BackgroundTrainer:
                 weight_decay=config.get("weight_decay", 0.0005),
                 warmup_epochs=config.get("warmup_epochs", 3.0),
                 warmup_momentum=config.get("warmup_momentum", 0.8),
+                workers=config.get("workers", 4),
                 epoch_callback=epoch_callback,
             )
 

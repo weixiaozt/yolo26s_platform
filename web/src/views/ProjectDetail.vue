@@ -226,7 +226,7 @@
         <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
         <div class="el-upload__text">拖拽标注包 ZIP，或<em>点击选择</em></div>
         <template #tip>
-          <div class="el-upload__tip">导出的项目包即可（只含已标注图 + 标注）；选择后先预览不写入</div>
+          <div class="el-upload__tip">导出的标注包即可（只含已标注图 + 标注）；选择后先预览不写入</div>
         </template>
       </el-upload>
 
@@ -528,7 +528,7 @@ async function onMergeFileChange(uf: UploadFile) {
     const { data } = await projectApi.mergePackage(projectId, uf.raw, true)
     mergeReport.value = data
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '预览失败，请确认是导出的项目包')
+    ElMessage.error(e?.response?.data?.detail || '预览失败，请确认是导出的标注包')
     resetMerge()
   } finally {
     mergeChecking.value = false

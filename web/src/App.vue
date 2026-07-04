@@ -35,8 +35,8 @@
           <el-tag size="small" :type="currentUser.role==='admin'?'danger':''">{{ currentUser.role==='admin'?'管理员':'用户' }}</el-tag>
         </div>
         <div class="user-actions">
-          <el-button text size="small" @click="showChangePwd = true" style="color:#aaa">修改密码</el-button>
-          <el-button text size="small" @click="logout" style="color:#F56C6C">退出</el-button>
+          <el-button class="user-action user-action--muted" size="small" round @click="showChangePwd = true">修改密码</el-button>
+          <el-button class="user-action user-action--danger" size="small" round @click="logout">退出</el-button>
         </div>
       </div>
     </el-aside>
@@ -104,7 +104,7 @@ async function changePassword() {
 
 <style scoped>
 .app-container { height:100vh; }
-.app-aside { background:#1d1e1f; border-right:1px solid #333; overflow-y:auto; display:flex; flex-direction:column; }
+.app-aside { background:#1d1e1f; border-right:1px solid #333; overflow:hidden; display:flex; flex-direction:column; }
 .logo { padding:22px 16px 18px; text-align:center; border-bottom:1px solid #333; }
 .logo h2 {
   margin:0;
@@ -125,11 +125,66 @@ async function changePassword() {
 }
 @keyframes logoShimmer { to { background-position:200% center; } }
 .logo span { display:block; margin-top:6px; color:#9aa0a6; font-size:12px; letter-spacing:6px; }
-.side-menu { border-right:none; flex:1; }
-.user-panel { padding:12px 16px; border-top:1px solid #333; }
-.user-info { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
-.user-name { color:#ddd; font-size:13px; font-weight:500; }
-.user-actions { display:flex; gap:4px; }
+.side-menu { border-right:none; flex:1; min-height:0; overflow-y:auto; }
+.user-panel {
+  flex:0 0 auto;
+  padding:12px 14px 14px;
+  border-top:1px solid #333;
+  background:#1d1e1f;
+}
+.user-info {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:10px;
+}
+.user-name {
+  min-width:0;
+  color:#f1f5f9;
+  font-size:13px;
+  font-weight:700;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.user-actions {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+.user-actions .el-button + .el-button {
+  margin-left:0;
+}
+.user-action {
+  width:100%;
+  height:28px;
+  padding:0 10px;
+  border:1px solid transparent;
+  font-weight:700;
+}
+.user-action--muted {
+  color:#cbd5e1;
+  background:#27292c;
+  border-color:#3a3d42;
+}
+.user-action--danger {
+  color:#ef4444;
+  background:#2a2021;
+  border-color:#4a2a2d;
+}
+.user-action--muted:hover,
+.user-action--muted:focus {
+  color:#fff;
+  background:#3b82f6;
+  border-color:#3b82f6;
+}
+.user-action--danger:hover,
+.user-action--danger:focus {
+  color:#fff;
+  background:#ef4444;
+  border-color:#ef4444;
+}
 .app-main { padding:0; background:#f5f7fa; overflow-y:auto; }
 .app-main.full-width { padding:0; }
 </style>

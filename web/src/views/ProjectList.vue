@@ -12,7 +12,7 @@
           <el-icon><Upload /></el-icon>
           导入项目
         </el-button>
-        <el-upload :auto-upload="false" :show-file-list="false" accept=".zip" :on-change="onPackageFileChange">
+        <el-upload :auto-upload="false" :show-file-list="false" accept=".zip" :on-change="onFullPackageFileChange">
           <el-button class="hbtn hbtn--orange" :loading="importing">
             <el-icon><FolderOpened /></el-icon>
             导入项目包
@@ -70,23 +70,43 @@
                 {{ dc.name }}
               </el-tag>
             </div>
-            <div class="project-time">
-              创建于 {{ formatDate(p.created_at) }}
-              <el-button
-                type="danger" text size="small"
-                style="float: right"
-                @click.stop="handleDeleteProject(p.id, p.name)"
-              >
-                删除项目
-              </el-button>
-              <el-button
-                type="primary" text size="small"
-                style="float: right; margin-right: 8px"
-                :loading="exportingId === p.id"
-                @click.stop="handleExport(p)"
-              >
-                导出
-              </el-button>
+            <div class="project-footer">
+              <span class="project-time">创建于 {{ formatDate(p.created_at) }}</span>
+              <div class="card-actions">
+                <el-button
+                  class="card-action card-action--blue"
+                  size="small"
+                  round
+                  :loading="exportingKey === `full:${p.id}`"
+                  @click.stop="handleExportFullProject(p)"
+                >
+                  导出项目
+                </el-button>
+                <el-button
+                  class="card-action card-action--sky"
+                  size="small"
+                  round
+                  :loading="exportingKey === `anno:${p.id}`"
+                  @click.stop="handleExportAnnotations(p)"
+                >
+                  导出标注
+                </el-button>
+                <el-button
+                  class="card-action card-action--red"
+                  size="small"
+                  round
+                  @click.stop="handleDeleteProject(p.id, p.name)"
+                >
+                  删除项目
+                </el-button>
+              </div>
+              <el-progress
+                v-if="exportingKey === `full:${p.id}` || exportingKey === `anno:${p.id}`"
+                class="export-progress"
+                :percentage="exportProgress"
+                :stroke-width="6"
+                :show-text="false"
+              />
             </div>
           </el-card>
         </div>
@@ -206,7 +226,8 @@ const router = useRouter()
 const projects = ref<Project[]>([])
 const showCreateDialog = ref(false)
 const creating = ref(false)
-const exportingId = ref<number | null>(null)
+const exportingKey = ref<string | null>(null)
+const exportProgress = ref(0)
 const importing = ref(false)
 
 const groupedProjects = computed(() => {
@@ -266,37 +287,83 @@ function resetForm() {
   }
 }
 
-async function handleExport(p: Project) {
-  exportingId.value = p.id
+function downloadBlob(data: any, filename: string) {
+  const blob = new Blob([data], { type: 'application/zip' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+async function handleExportAnnotations(p: Project) {
+  const key = `anno:${p.id}`
+  exportingKey.value = key
+  exportProgress.value = 0
   try {
-    const resp = await projectApi.exportPackage(p.id)
-    const blob = new Blob([resp.data as any], { type: 'application/zip' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${p.name}_export.zip`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-    ElMessage.success('导出完成')
+    const resp = await projectApi.exportPackage(p.id, percent => {
+      if (exportingKey.value === key) exportProgress.value = percent
+    })
+    exportProgress.value = 100
+    downloadBlob(resp.data as any, `${p.name}_annotations.zip`)
+    ElMessage.success('标注包导出完成')
   } catch (e: any) {
-    ElMessage.error('导出失败: ' + (e?.message || '未知错误'))
+    ElMessage.error('导出标注失败: ' + (e?.message || '未知错误'))
   } finally {
-    exportingId.value = null
+    window.setTimeout(() => {
+      if (exportingKey.value === key) {
+        exportingKey.value = null
+        exportProgress.value = 0
+      }
+    }, 450)
   }
 }
 
-async function onPackageFileChange(f: any) {
+async function handleExportFullProject(p: Project) {
+  const key = `full:${p.id}`
+  exportingKey.value = key
+  exportProgress.value = 0
+  try {
+    const resp = await projectApi.exportFullPackage(p.id, percent => {
+      if (exportingKey.value === key) exportProgress.value = percent
+    })
+    exportProgress.value = 100
+    downloadBlob(resp.data as any, `${p.name}_full_project.zip`)
+    ElMessage.success('完整项目包导出完成')
+  } catch (e: any) {
+    if (e?.response?.status === 404) {
+      ElMessage.error('导出项目接口 404：后端还没加载新接口，请重启 uvicorn 后再试')
+    } else {
+      ElMessage.error('导出项目失败: ' + (e?.response?.data?.detail || e?.message || '未知错误'))
+    }
+  } finally {
+    window.setTimeout(() => {
+      if (exportingKey.value === key) {
+        exportingKey.value = null
+        exportProgress.value = 0
+      }
+    }, 450)
+  }
+}
+
+async function onFullPackageFileChange(f: any) {
   const file: File = f.raw
   if (!file) return
   if (!file.name.toLowerCase().endsWith('.zip')) {
     ElMessage.warning('请选择 ZIP 文件')
     return
   }
+  const lowerName = file.name.toLowerCase()
+  if (lowerName.includes('_annotations') || lowerName.includes('annotations.zip')) {
+    ElMessage.warning('这是标注包，请进入目标项目详情页，使用“合并标注包”导入')
+    return
+  }
   try {
     await ElMessageBox.confirm(
-      `即将导入项目包「${file.name}」(${(file.size / 1024 / 1024).toFixed(1)} MB)，是否继续？`,
+      `即将导入完整项目包「${file.name}」(${(file.size / 1024 / 1024).toFixed(1)} MB)，会恢复全部图片、标注、训练任务和权重，是否继续？`,
       '导入确认',
       { confirmButtonText: '确定导入', cancelButtonText: '取消' }
     )
@@ -305,10 +372,10 @@ async function onPackageFileChange(f: any) {
   }
   importing.value = true
   try {
-    const { data } = await projectApi.importPackage(file)
+    const { data } = await projectApi.importFullPackage(file)
     const msg = data.renamed
-      ? `导入成功：项目已重命名为「${data.project_name}」，${data.image_count} 张图片 / ${data.annotation_count} 个标注`
-      : `导入成功：${data.image_count} 张图片 / ${data.annotation_count} 个标注`
+      ? `导入成功：项目已重命名为「${data.project_name}」，${data.image_count} 张图片 / ${data.annotation_count} 个标注 / ${data.train_task_count} 个训练任务`
+      : `导入成功：${data.image_count} 张图片 / ${data.annotation_count} 个标注 / ${data.train_task_count} 个训练任务`
     ElMessage.success(msg)
     loadProjects()
   } catch (e: any) {
@@ -394,35 +461,49 @@ onMounted(loadProjects)
 
 .project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 20px;
-  margin-bottom: 24px;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 390px));
+  gap: 22px 26px;
+  margin-bottom: 28px;
 }
 .project-card {
   cursor: pointer;
   transition: transform 0.2s;
+  min-height: 255px;
 }
 .project-card:hover {
   transform: translateY(-3px);
+}
+:deep(.project-card .el-card__body) {
+  display: flex;
+  flex-direction: column;
+  min-height: 170px;
 }
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
 }
 .project-name {
   font-size: 16px;
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .project-desc {
   color: #909399;
   font-size: 13px;
   margin-bottom: 12px;
-  min-height: 20px;
+  min-height: 38px;
+  line-height: 1.45;
 }
 .project-meta {
   display: flex;
-  gap: 20px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 22px;
   font-size: 13px;
   color: #606266;
   margin-bottom: 10px;
@@ -434,10 +515,90 @@ onMounted(loadProjects)
 }
 .project-classes {
   margin-bottom: 10px;
+  min-height: 26px;
+}
+.project-footer {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 8px;
 }
 .project-time {
   font-size: 12px;
   color: #c0c4cc;
+  width: 100%;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+.card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+.card-actions .el-button + .el-button {
+  margin-left: 0;
+}
+.card-action {
+  min-width: 72px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  font-weight: 600;
+}
+.card-action--blue {
+  color: #2563eb;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+.card-action--sky {
+  color: #0284c7;
+  background: #f0f9ff;
+  border-color: #bae6fd;
+}
+.card-action--red {
+  color: #ef4444;
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+.card-action--blue:hover,
+.card-action--blue:focus {
+  color: #fff;
+  background: #3b82f6;
+  border-color: #3b82f6;
+}
+.card-action--sky:hover,
+.card-action--sky:focus {
+  color: #fff;
+  background: #0ea5e9;
+  border-color: #0ea5e9;
+}
+.card-action--red:hover,
+.card-action--red:focus {
+  color: #fff;
+  background: #ef4444;
+  border-color: #ef4444;
+}
+.export-progress {
+  width: 100%;
+  margin-top: 2px;
+}
+@media (max-width: 720px) {
+  .project-grid {
+    grid-template-columns: 1fr;
+  }
+  .project-footer {
+    grid-template-columns: 1fr;
+  }
+  .card-actions {
+    justify-content: flex-start;
+    max-width: none;
+  }
 }
 .class-list {
   display: grid;

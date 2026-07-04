@@ -23,6 +23,7 @@ class TrainConfig(BaseModel):
     batch_size: int = Field(default=16, ge=1, le=512)   # 大显存机器（≥32G）+ cls 224 可上 256~512
     patience: int = Field(default=50, ge=0)
     device: str = Field(default="0")
+    workers: int = Field(default=4, ge=0, le=16)
 
     # 学习率
     lr0: float = Field(default=0.01)

@@ -36,7 +36,8 @@
         </el-table-column>
         <el-table-column label="耗时" width="120">
           <template #default="{row}">
-            <span v-if="['pending','preparing','training','exporting'].includes(row.status)">运行中...</span>
+            <span v-if="isActiveStatus(row.status) && row.started_at">{{ duration(row.started_at, null) }}</span>
+            <span v-else-if="isActiveStatus(row.status)">等待中...</span>
             <span v-else-if="row.started_at && row.finished_at">{{ duration(row.started_at, row.finished_at) }}</span>
             <span v-else style="color:#999">-</span>
           </template>
@@ -57,6 +58,38 @@
         <template #title>训练失败</template>
         <pre style="white-space:pre-wrap;font-size:12px;max-height:200px;overflow:auto">{{ selectedTask.error_message }}</pre>
       </el-alert>
+
+      <!-- 训练计时 -->
+      <el-card v-if="selectedTask" shadow="never" class="time-card">
+        <template #header>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="font-weight:600">训练计时 — {{ selectedTask.task_name }}</span>
+            <el-tag :type="statusType(selectedTask.status)" size="small">{{ statusText(selectedTask.status) }}</el-tag>
+          </div>
+        </template>
+        <div class="time-grid">
+          <div class="time-item">
+            <div class="time-label">已用时间</div>
+            <div class="time-value">{{ selectedTiming.elapsed }}</div>
+            <div class="time-tip">{{ selectedTiming.startedAt }}</div>
+          </div>
+          <div class="time-item">
+            <div class="time-label">平均每轮</div>
+            <div class="time-value">{{ selectedTiming.avgEpoch }}</div>
+            <div class="time-tip">按已完成 epoch 估算</div>
+          </div>
+          <div class="time-item">
+            <div class="time-label">预计剩余</div>
+            <div class="time-value">{{ selectedTiming.remaining }}</div>
+            <div class="time-tip">{{ selectedTiming.progress }}</div>
+          </div>
+          <div class="time-item">
+            <div class="time-label">预计完成</div>
+            <div class="time-value">{{ selectedTiming.finishAt }}</div>
+            <div class="time-tip">{{ selectedTiming.finishedAt }}</div>
+          </div>
+        </div>
+      </el-card>
 
       <!-- 训练参数（点击展开/收起） -->
       <el-card v-if="selectedTask?.config" shadow="never" style="margin-bottom:20px">
@@ -94,6 +127,7 @@
           <span class="ps-item"><b>模型:</b> {{ cfg.model_name || '-' }}</span>
           <span class="ps-item"><b>Epochs:</b> {{ cfg.epochs || '-' }}</span>
           <span class="ps-item"><b>BatchSize:</b> {{ cfg.batch_size || '-' }}</span>
+          <span class="ps-item"><b>Workers:</b> {{ formatValue('workers') }}</span>
           <span class="ps-item"><b>lr0:</b> {{ cfg.lr0 ?? '-' }}</span>
           <span class="ps-item"><b>degrees:</b> {{ cfg.degrees ?? '-' }}</span>
           <span class="ps-item"><b>device:</b> {{ cfg.device ?? '-' }}</span>
@@ -185,11 +219,14 @@ const tasks = ref<TrainTask[]>([])
 const selectedTaskId = ref<number|null>(null)
 const epochs = ref<EpochLog[]>([])
 let pollTimer: any = null
+let clockTimer: any = null
+const nowTs = ref(Date.now())
 
 const selectedTask = computed(() => tasks.value.find(t => t.id === selectedTaskId.value))
 
 // 是否分类任务（cls 的指标和 seg/det/obb 不同：单一 loss + Top1/Top5 准确率）
 const isClsTask = computed(() => (selectedTask.value?.config as any)?.task_type === 'cls')
+const selectedTiming = computed(() => getTiming(selectedTask.value || null))
 
 // ========== 训练参数展示 ==========
 const paramsExpanded = ref(true)
@@ -208,6 +245,7 @@ const paramGroups: ParamGroup[] = [
       { key: 'batch_size',    label: 'Batch Size',tip: '一次梯度更新的图片数' },
       { key: 'patience',      label: 'Patience',  tip: '早停容忍轮数（连续无提升）' },
       { key: 'device',        label: '设备',      tip: '0=GPU0 / cpu' },
+      { key: 'workers',       label: 'DataLoader Workers', tip: '数据加载/增强子进程数；Windows 异常时可设为 0' },
       { key: 'train_mode',    label: '训练模式',  tip: 'scratch=从头 / finetune=继承' },
       { key: 'resume_from_task_id', label: '继承自', tip: '继承训练时来源任务 ID' },
       { key: 'train_ratio',   label: '训练集占比' },
@@ -275,11 +313,13 @@ const paramGroups: ParamGroup[] = [
 ]
 
 function hasValue(k: string): boolean {
+  if (k === 'workers') return true
   const v = cfg.value[k]
   return v !== undefined && v !== null && v !== ''
 }
 function formatValue(k: string, fmt?: string): string {
   const v = cfg.value[k]
+  if (k === 'workers' && (v === undefined || v === null || v === '')) return '未记录（旧任务）'
   if (v === undefined || v === null) return '-'
   if (typeof v === 'boolean') return v ? '是' : '否'
   if (Array.isArray(v)) return JSON.stringify(v)
@@ -344,11 +384,13 @@ onMounted(async () => {
       if (selectedTaskId.value) await loadEpochs()
     }
   }, 5000)
+  clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize)
   if (pollTimer) clearInterval(pollTimer)
+  if (clockTimer) clearInterval(clockTimer)
   charts.forEach(c => c.dispose())
   charts = []
 })
@@ -373,8 +415,13 @@ async function loadEpochs() {
 
 async function cancelTask(taskId: number) {
   try {
+    await ElMessageBox.confirm(
+      '将请求训练在最近的检查点友好停止，已产生的 best.pt / last.pt 会尽量保留。确定取消？',
+      '友好取消训练',
+      { type: 'warning', confirmButtonText: '请求取消', cancelButtonText: '继续训练' }
+    )
     await trainApi.cancelTask(taskId)
-    ElMessage.success('已取消')
+    ElMessage.success('已请求友好取消，训练会在最近检查点停止')
     loadTasks()
   } catch {}
 }
@@ -492,12 +539,63 @@ function statusType(s: string) {
 function statusText(s: string) {
   return ({ pending: '排队中', preparing: '准备数据', training: '训练中', completed: '已完成', failed: '失败', cancelled: '已取消' } as any)[s] || s
 }
-function duration(start: string, end: string) {
-  const s = new Date(start).getTime(), e = new Date(end).getTime()
-  const sec = Math.round((e - s) / 1000)
+function isActiveStatus(s: string) {
+  return ['pending', 'preparing', 'training', 'exporting'].includes(s)
+}
+function duration(start: string, end: string | null) {
+  const s = new Date(start).getTime()
+  const e = end ? new Date(end).getTime() : nowTs.value
+  return formatSeconds(Math.max(0, Math.round((e - s) / 1000)))
+}
+function formatSeconds(sec: number) {
   if (sec < 60) return `${sec}秒`
   if (sec < 3600) return `${Math.floor(sec/60)}分${sec%60}秒`
-  return `${Math.floor(sec/3600)}时${Math.floor((sec%3600)/60)}分`
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  return `${h}时${m}分`
+}
+function formatDateTime(ts: number | string | null) {
+  if (!ts) return '-'
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return '-'
+  return d.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+function getTiming(task: TrainTask | null) {
+  if (!task || !task.started_at) {
+    return {
+      elapsed: '-',
+      avgEpoch: '-',
+      remaining: '-',
+      finishAt: '-',
+      startedAt: '尚未开始',
+      finishedAt: '',
+      progress: '-',
+    }
+  }
+
+  const start = new Date(task.started_at).getTime()
+  const end = task.finished_at ? new Date(task.finished_at).getTime() : nowTs.value
+  const elapsedSec = Math.max(0, Math.round((end - start) / 1000))
+  const totalEpochs = Math.max(0, task.epochs || 0)
+  const doneEpochs = Math.max(0, Math.min(task.current_epoch || epochs.value.length || 0, totalEpochs || task.current_epoch || 0))
+  const avgSec = doneEpochs > 0 ? elapsedSec / doneEpochs : 0
+  const remainingEpochs = Math.max(0, totalEpochs - doneEpochs)
+  const remainingSec = avgSec > 0 && isActiveStatus(task.status) ? Math.round(avgSec * remainingEpochs) : 0
+
+  return {
+    elapsed: formatSeconds(elapsedSec),
+    avgEpoch: avgSec > 0 ? formatSeconds(Math.round(avgSec)) : '-',
+    remaining: isActiveStatus(task.status) && avgSec > 0 ? formatSeconds(remainingSec) : (task.status === 'completed' ? '已完成' : '-'),
+    finishAt: isActiveStatus(task.status) && avgSec > 0 ? formatDateTime(nowTs.value + remainingSec * 1000) : (task.finished_at ? formatDateTime(task.finished_at) : '-'),
+    startedAt: `开始：${formatDateTime(task.started_at)}`,
+    finishedAt: task.finished_at ? `结束：${formatDateTime(task.finished_at)}` : (avgSec > 0 ? '基于当前平均速度' : '等待首轮完成后估算'),
+    progress: totalEpochs > 0 ? `${doneEpochs}/${totalEpochs} epoch` : `${doneEpochs} epoch`,
+  }
 }
 
 // 窗口 resize 监听器在 onMounted / onBeforeUnmount 配对管理（见上方）
@@ -517,6 +615,40 @@ function duration(start: string, end: string) {
 pre {
   margin: 0;
   font-family: Consolas, monospace;
+}
+
+.time-card {
+  margin-bottom: 20px;
+}
+.time-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.time-item {
+  background: #fafbfc;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.time-label {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 4px;
+}
+.time-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #303133;
+  line-height: 1.25;
+  word-break: break-all;
+}
+.time-tip {
+  font-size: 11px;
+  color: #c0c4cc;
+  margin-top: 4px;
+  min-height: 16px;
 }
 
 /* 训练参数展示 */

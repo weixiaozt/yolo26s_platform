@@ -4,6 +4,8 @@
 import sys
 import uuid
 import base64
+
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -879,7 +881,9 @@ def crop_defects_for_classifier(
             key = (cls_name, out_size)
             idx = counters.get(key, 0)
             counters[key] = idx + 1
-            zip_name = f"{cls_name}/{cls_name}_{out_size}_{idx}{ext}"
+            stem = Path((rec.filename or "image").replace("\\", "/")).stem or "image"
+            ts = datetime.now().strftime("%H%M%S%f")[:-3]
+            zip_name = f"{cls_name}/{stem}_{cls_name}_{out_size}_{idx}_{ts}{ext}"
             crops.append((zip_name, buf.tobytes()))
 
     if not crops:

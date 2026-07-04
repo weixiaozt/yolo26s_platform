@@ -29,6 +29,7 @@ from ..schemas.project import (
 )
 from ..services.project_package import (
     export_project_to_zip, import_project_from_zip, merge_pack_into_project,
+    export_full_project_to_zip, import_full_project_from_zip,
 )
 from ..services.project_convert import convert_project_task_type
 
@@ -237,14 +238,14 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{project_id}/export-package")
 def export_package(project_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """导出项目为 ZIP（仅已标注图片）"""
+    """导出标注包 ZIP（仅已标注/已审核图片 + 标注）。"""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="proj_export_"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="anno_export_"))
     safe_stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in project.name)
-    out_path = tmp_dir / f"{safe_stem}_export.zip"
+    out_path = tmp_dir / f"{safe_stem}_annotations.zip"
 
     try:
         export_project_to_zip(project_id, db, out_path)
@@ -256,7 +257,36 @@ def export_package(project_id: int, background_tasks: BackgroundTasks, db: Sessi
     # 让 FileResponse 写完后再把临时目录删掉，避免泄漏
     background_tasks.add_task(shutil.rmtree, str(tmp_dir), ignore_errors=True)
 
-    download_name = f"{project.name}_export.zip"
+    download_name = f"{project.name}_annotations.zip"
+    return FileResponse(
+        str(out_path),
+        media_type="application/zip",
+        filename=download_name,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(download_name)}"},
+    )
+
+
+@router.get("/{project_id}/export-full-package")
+def export_full_package(project_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """导出完整项目迁移包 ZIP（全部图片 + 标注 + 训练任务 + best/last 权重）。"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="proj_full_export_"))
+    safe_stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in project.name)
+    out_path = tmp_dir / f"{safe_stem}_full_project.zip"
+
+    try:
+        export_full_project_to_zip(project_id, db, out_path)
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        log.exception("export_full_project_to_zip failed for project_id=%s", project_id)
+        raise HTTPException(status_code=500, detail=f"导出失败: {e}")
+
+    background_tasks.add_task(shutil.rmtree, str(tmp_dir), ignore_errors=True)
+
+    download_name = f"{project.name}_full_project.zip"
     return FileResponse(
         str(out_path),
         media_type="application/zip",
@@ -267,7 +297,7 @@ def export_package(project_id: int, background_tasks: BackgroundTasks, db: Sessi
 
 @router.post("/import-package")
 async def import_package(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """从 ZIP 导入完整项目（含图片和标注）"""
+    """从标注包 ZIP 导入新项目（兼容旧的轻量包格式）。"""
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="请上传 ZIP 文件")
 
@@ -287,6 +317,31 @@ async def import_package(file: UploadFile = File(...), db: Session = Depends(get
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         log.exception("import_project_from_zip failed for upload=%s", file.filename)
+        raise HTTPException(status_code=500, detail=f"导入失败: {e}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@router.post("/import-full-package")
+async def import_full_package(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """从完整项目迁移包 ZIP 导入新项目。"""
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="请上传 ZIP 文件")
+
+    fd, tmp_str = tempfile.mkstemp(suffix=".zip", prefix="proj_full_import_")
+    tmp_path = Path(tmp_str)
+    try:
+        os.close(fd)
+        content = await file.read()
+        tmp_path.write_bytes(content)
+
+        with open(tmp_path, "rb") as f:
+            result = import_full_project_from_zip(f, db)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("import_full_project_from_zip failed for upload=%s", file.filename)
         raise HTTPException(status_code=500, detail=f"导入失败: {e}")
     finally:
         tmp_path.unlink(missing_ok=True)

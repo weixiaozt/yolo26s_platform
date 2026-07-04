@@ -139,6 +139,10 @@
                 <el-option label="CPU" value="cpu" />
               </el-select>
             </el-form-item>
+            <el-form-item label="DataLoader Workers">
+              <el-input-number v-model="c.workers" :min="0" :max="16" />
+              <span class="hint">4070 Ti 建议先试 4；如训练启动异常可改回 0</span>
+            </el-form-item>
           </el-card>
 
           <!-- 学习率 -->
@@ -323,7 +327,7 @@ const taskType = ref<'seg'|'det'|'cls'|'obb'>('seg')
 function getBaseDefaults() {
   return {
     model_name: 'yolo11s-seg',
-    epochs: 200, batch_size: 8, patience: 50, device: '0',
+    epochs: 200, batch_size: 8, patience: 50, device: '0', workers: 4,
     lr0: 0.01, lrf: 0.01, momentum: 0.937, weight_decay: 0.0005,
     warmup_epochs: 3, warmup_momentum: 0.8,
     train_ratio: 0.8, oversample_factor: 5,
@@ -505,6 +509,12 @@ async function importParamsJson(file: any) {
     }
     const n = Object.keys(cleaned).length
     if (n === 0) { ElMessage.warning('JSON 里没有可导入的训练参数'); return }
+    if (cleaned.workers === undefined || cleaned.workers === null || cleaned.workers === '') {
+      cleaned.workers = 4
+    } else {
+      const workers = Number(cleaned.workers)
+      cleaned.workers = Number.isFinite(workers) ? Math.min(16, Math.max(0, Math.trunc(workers))) : 4
+    }
     Object.assign(c.value, cleaned)
     const note = skipped > 0 ? `（跳过 ${skipped} 个项目级/特殊字段）` : ''
     ElMessage.success(`已导入 ${n} 个训练参数${note}`)
