@@ -14,7 +14,7 @@
           <el-radio-button label="labeled">已标注 ({{ stats.labeled }})</el-radio-button>
         </el-radio-group>
         <el-tag
-          v-if="classFilter !== null"
+          v-if="classFilters.length > 0"
           closable
           type="warning"
           effect="dark"
@@ -22,7 +22,7 @@
           @close="clearClassFilter"
           style="margin-left:8px"
         >
-          仅看 {{ classFilterName }} ({{ totalItems }})
+          仅看 {{ classFilterText }} ({{ totalItems }})
         </el-tag>
         <el-divider direction="vertical" />
         <span class="hint">
@@ -81,20 +81,52 @@
       <!-- 右侧类别面板 -->
       <div class="side">
         <div class="side-title">类别（按数字键快速打标）</div>
+        <div class="folder-label-box">
+          <el-button
+            size="small"
+            class="folder-label-btn"
+            :loading="folderLabeling"
+            @click="runFolderLabel"
+          >
+            按文件夹名标注
+          </el-button>
+          <div>仅处理未标注图片，不覆盖已有标签。</div>
+        </div>
+        <div class="filter-strip">
+          <span>类别筛选</span>
+          <b v-if="classFilters.length > 0">已选 {{ classFilters.length }} 类</b>
+          <b v-else>全部类别</b>
+          <el-button
+            text
+            size="small"
+            type="warning"
+            :disabled="classFilters.length === 0"
+            @click="clearClassFilter"
+          >
+            清除
+          </el-button>
+        </div>
         <div class="class-list">
           <div
             v-for="(dc, idx) in defectClasses"
             :key="dc.id"
-            :class="['class-row', { active: hoveredClass === dc.id, filtering: classFilter === dc.id }]"
+            :class="['class-row', { active: hoveredClass === dc.id, filtering: isClassFiltered(dc.id!) }]"
             @click="applyClass(dc.id!)"
             @mouseenter="hoveredClass = dc.id || null"
           >
+            <el-checkbox
+              class="class-filter-check"
+              :model-value="isClassFiltered(dc.id!)"
+              :title="isClassFiltered(dc.id!) ? `取消筛选 ${dc.name}` : `筛选 ${dc.name}`"
+              @click.stop
+              @change="toggleClassFilter(dc.id!)"
+            />
             <span class="key-badge">{{ idx + 1 }}</span>
             <span class="cls-dot" :style="{ background: dc.color }"></span>
             <span class="cls-name">{{ dc.name }}</span>
             <span
-              :class="['cls-count', { 'cls-count-active': classFilter === dc.id }]"
-              :title="classFilter === dc.id ? '点击取消筛选' : `点击只看 ${dc.name} 的图片（核对错标）`"
+              :class="['cls-count', { 'cls-count-active': isClassFiltered(dc.id!) }]"
+              :title="isClassFiltered(dc.id!) ? '点击取消筛选' : `点击筛选 ${dc.name} 的图片`"
               @click.stop="toggleClassFilter(dc.id!)"
             >
               {{ classCounts.get(dc.id!) || 0 }}
@@ -137,21 +169,25 @@ const items = ref<ImageInfo[]>([])
 const selected = ref<Set<number>>(new Set())
 const lastClickedId = ref<number | null>(null)
 const filter = ref<'all' | 'unlabeled' | 'labeled'>('all')
-const classFilter = ref<number | null>(null)   // 按类别 id 筛选；null = 不筛选
+const classFilters = ref<number[]>([])   // 按类别 id 多选筛选；空数组 = 不筛选
 const loading = ref(false)
 const page = ref(1)
 const pageSize = 36   // 6 × 6
 const totalItems = ref(0)
 const hoveredClass = ref<number | null>(null)
 
-const classFilterName = computed(() =>
-  classFilter.value !== null
-    ? (defectClasses.value.find(c => c.id === classFilter.value)?.name || '')
-    : ''
-)
+const classFilterText = computed(() => {
+  if (classFilters.value.length === 0) return ''
+  const names = classFilters.value
+    .map(id => defectClasses.value.find(c => c.id === id)?.name || '')
+    .filter(Boolean)
+  if (names.length <= 2) return names.join('、')
+  return `${names.slice(0, 2).join('、')} 等 ${names.length} 类`
+})
 
 const saveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
 const saveStateText = computed(() => ({ idle: '', saving: '保存中…', saved: '已保存', error: '保存失败' }[saveState.value]))
+const folderLabeling = ref(false)
 
 const stats = computed(() => {
   const total = project.value?.total_images || 0
@@ -203,7 +239,9 @@ async function loadPage() {
   try {
     const params: any = { page: page.value, page_size: pageSize }
     if (filter.value !== 'all') params.status = filter.value
-    if (classFilter.value !== null) params.class_id = classFilter.value
+    if (classFilters.value.length > 0 && filter.value !== 'unlabeled') {
+      params.class_ids = classFilters.value.join(',')
+    }
     const { data } = await imageApi.list(parseInt(props.projectId), params)
     items.value = data.items
     totalItems.value = data.total
@@ -214,21 +252,33 @@ async function loadPage() {
   }
 }
 
+function isClassFiltered(cid: number) {
+  return classFilters.value.includes(cid)
+}
+
 function toggleClassFilter(cid: number) {
-  // 已经在筛选这个类 → 取消；否则切到这个类
-  classFilter.value = classFilter.value === cid ? null : cid
+  const set = new Set(classFilters.value)
+  if (set.has(cid)) set.delete(cid)
+  else set.add(cid)
+  classFilters.value = Array.from(set)
+  if (classFilters.value.length > 0 && filter.value === 'unlabeled') {
+    filter.value = 'labeled'
+  }
   page.value = 1
   selected.value.clear()
   loadPage()
 }
 function clearClassFilter() {
-  classFilter.value = null
+  classFilters.value = []
   page.value = 1
   selected.value.clear()
   loadPage()
 }
 
 async function reload() {
+  if (filter.value === 'unlabeled' && classFilters.value.length > 0) {
+    classFilters.value = []
+  }
   page.value = 1
   selected.value.clear()
   await loadPage()
@@ -301,9 +351,38 @@ async function applyClass(classId: number | null) {
     // 刷项目统计（标注计数变化）+ 全量类别计数
     await loadProject()
     await loadClassStats()
+    if (classFilters.value.length > 0 || filter.value !== 'all') {
+      selected.value.clear()
+      selected.value = new Set()
+      await loadPage()
+    }
   } catch (e: any) {
     saveState.value = 'error'
     ElMessage.error('打标失败：' + (e?.response?.data?.detail || e?.message || ''))
+  }
+}
+
+async function runFolderLabel() {
+  folderLabeling.value = true
+  try {
+    const { data } = await imageApi.labelByFolder(parseInt(props.projectId), true)
+    const lines = [
+      `已按文件夹名标注 ${data.updated} 张`,
+      data.skipped ? `跳过 ${data.skipped} 张` : '',
+      data.unknown_folders?.length ? `未匹配文件夹：${data.unknown_folders.slice(0, 8).join('、')}` : '',
+    ].filter(Boolean)
+    await loadProject()
+    await loadClassStats()
+    await loadPage()
+    if (data.unknown_folders?.length) {
+      ElMessage.warning(lines.join('；'))
+    } else {
+      ElMessage.success(lines.join('；') || '没有需要标注的图片')
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '按文件夹名标注失败')
+  } finally {
+    folderLabeling.value = false
   }
 }
 
@@ -426,12 +505,49 @@ onBeforeUnmount(() => {})
 .loading-row { text-align: center; color: #888; font-size: 12px; padding: 20px; }
 
 .side { width: 260px; background: #252525; border-left: 1px solid #444; display: flex; flex-direction: column; padding: 12px; }
-.side-title { font-weight: 600; font-size: 13px; color: #aaa; margin-bottom: 12px; }
+.side-title { font-weight: 600; font-size: 13px; color: #aaa; margin-bottom: 8px; }
+.folder-label-box {
+  padding: 8px 6px;
+  margin-bottom: 10px;
+  border: 1px solid #34465f;
+  border-radius: 6px;
+  background: #1f2d3d;
+}
+.folder-label-btn {
+  width: 100%;
+  margin-bottom: 6px;
+}
+.folder-label-box div {
+  color: #8fa6bf;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.filter-strip {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 6px;
+  margin-bottom: 10px;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  background: #202020;
+  color: #aaa;
+  font-size: 12px;
+}
+.filter-strip b {
+  min-width: 0;
+  color: #E6A23C;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .class-list { display: flex; flex-direction: column; gap: 4px; flex: 1; overflow-y: auto; }
 .class-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 10px 8px;
   border-radius: 6px;
   cursor: pointer;
@@ -442,6 +558,23 @@ onBeforeUnmount(() => {})
 .class-row.active { background: #1a3a5c; }
 .class-row.filtering { background: #4a3819; box-shadow: inset 3px 0 0 #E6A23C; }
 .class-row.clear-row { margin-top: 6px; border-top: 1px dashed #555; padding-top: 12px; color: #888; }
+.class-filter-check {
+  flex: 0 0 auto;
+  height: 18px;
+}
+.class-filter-check :deep(.el-checkbox__label) {
+  display: none;
+}
+.class-filter-check :deep(.el-checkbox__inner) {
+  width: 15px;
+  height: 15px;
+  border-color: #666;
+  background: #303030;
+}
+.class-filter-check :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  border-color: #E6A23C;
+  background: #E6A23C;
+}
 .key-badge {
   display: inline-flex;
   align-items: center;

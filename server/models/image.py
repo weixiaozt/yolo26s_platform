@@ -17,6 +17,10 @@ class Image(Base):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
 
     filename: Mapped[str] = mapped_column(String(300), nullable=False, comment="原始文件名")
+    source_relative_path: Mapped[str | None] = mapped_column(
+        String(500), nullable=True,
+        comment="上传时的相对路径，用于按文件夹名快速标注",
+    )
     file_path: Mapped[str] = mapped_column(String(500), nullable=False, comment="相对于 storage/uploads 的路径")
     thumb_path: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="缩略图路径")
     mask_path: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="标注mask路径")

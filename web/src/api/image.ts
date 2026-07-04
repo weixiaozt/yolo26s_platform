@@ -4,6 +4,7 @@ export interface ImageInfo {
   id: number
   project_id: number
   filename: string
+  source_relative_path?: string | null
   width: number
   height: number
   file_size: number
@@ -22,14 +23,34 @@ export interface ImageListResponse {
   items: ImageInfo[]
 }
 
+export interface ImageUploadResponse {
+  items: ImageInfo[]
+  uploaded: number
+  auto_labeled: number
+  renamed: Array<{ original: string; new: string }>
+  unknown_folders: string[]
+  matched_classes: Record<string, number>
+}
+
+export interface FolderLabelResponse {
+  updated: number
+  skipped: number
+  unknown_folders: string[]
+  matched_classes: Record<string, number>
+}
+
 export const imageApi = {
-  list: (projectId: number, params?: { page?: number; page_size?: number; status?: string; class_id?: number }) =>
+  list: (projectId: number, params?: { page?: number; page_size?: number; status?: string; class_id?: number; class_ids?: string }) =>
     api.get<ImageListResponse>(`/projects/${projectId}/images`, { params }),
 
-  upload: (projectId: number, files: File[], onProgress?: (pct: number) => void) => {
+  upload: (projectId: number, files: File[], onProgress?: (pct: number) => void, autoLabelByFolder = false) => {
     const formData = new FormData()
-    files.forEach((f) => formData.append('files', f))
-    return api.post<ImageInfo[]>(`/projects/${projectId}/images/upload`, formData, {
+    formData.append('auto_label_by_folder', String(autoLabelByFolder))
+    files.forEach((f) => {
+      const rel = (f as any).webkitRelativePath || f.name
+      formData.append('files', f, rel)
+    })
+    return api.post<ImageUploadResponse>(`/projects/${projectId}/images/upload`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 300000, // 5 分钟，大文件上传
       onUploadProgress: (e) => {
@@ -62,6 +83,11 @@ export const imageApi = {
     api.get<{ by_class: Record<string, number>; unlabeled: number; total: number }>(
       `/projects/${projectId}/images/class-stats`,
     ),
+
+  labelByFolder: (projectId: number, onlyUnlabeled = true) =>
+    api.post<FolderLabelResponse>(`/projects/${projectId}/images/label-by-folder`, {
+      only_unlabeled: onlyUnlabeled,
+    }),
 
   delete: (imageId: number) =>
     api.delete(`/images/${imageId}`),

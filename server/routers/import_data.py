@@ -751,6 +751,7 @@ async def import_cls_project_folder(
             image = Image(
                 project_id=project.id,
                 filename=basename,
+                source_relative_path=f"{cls_name}/{basename}",
                 file_path=rel_path,
                 width=w, height=h,
                 class_id=cls_id,

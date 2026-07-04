@@ -107,6 +107,11 @@ def init_db():
             "CREATE INDEX idx_images_content_hash ON images(content_hash)",
             "images.content_hash 索引",
         ),
+        (
+            "ALTER TABLE images ADD COLUMN source_relative_path VARCHAR(500) NULL "
+            "COMMENT '上传时的相对路径，用于按文件夹名快速标注'",
+            "images.source_relative_path",
+        ),
     ]
     # MySQL 在字段/索引/约束已存在时分别报这些错；其它异常视为真正失败要打印出来。
     _ALREADY_EXISTS_TOKENS = ("Duplicate column", "Duplicate key", "Duplicate", "already exists", "errno: 121", "1060", "1061", "1826")

@@ -179,6 +179,15 @@
 
     <!-- 上传对话框 -->
     <el-dialog v-model="showUpload" title="上传图像" width="500px">
+      <input
+        v-if="project?.task_type === 'cls'"
+        ref="folderUploadInput"
+        type="file"
+        webkitdirectory
+        multiple
+        style="display:none"
+        @change="onFolderUploadPick"
+      />
       <el-upload
         ref="uploadRef"
         drag
@@ -197,6 +206,13 @@
           <div class="el-upload__tip">支持 BMP / PNG / JPG / TIFF 格式</div>
         </template>
       </el-upload>
+      <div v-if="project?.task_type === 'cls'" class="cls-upload-tools">
+        <el-button size="small" @click="(folderUploadInput as any)?.click?.()">选择文件夹</el-button>
+        <el-checkbox v-model="autoLabelByFolder">按文件夹名自动标注</el-checkbox>
+      </div>
+      <div v-if="project?.task_type === 'cls' && folderUploadCount > 0" class="folder-upload-hint">
+        已选择文件夹图片 {{ folderUploadCount }} 张
+      </div>
 
       <template #footer>
         <el-button @click="showUpload = false">取消</el-button>
@@ -366,10 +382,13 @@ const loading = ref(false)
 // 上传
 const showUpload = ref(false)
 const uploadRef = ref()
+const folderUploadInput = ref<HTMLInputElement>()
 const uploadFiles = ref<File[]>([])
 const uploadFileList = ref<UploadFile[]>([])
 const uploading = ref(false)
 const uploadProgress = ref(0)
+const autoLabelByFolder = ref(false)
+const folderUploadCount = ref(0)
 
 async function loadProject() {
   const { data } = await projectApi.get(projectId)
@@ -479,10 +498,37 @@ async function handleBatchDelete() {
 }
 
 function onFileChange(file: UploadFile) {
-  if (file.raw) uploadFiles.value.push(file.raw)
+  if (file.raw) {
+    folderUploadCount.value = 0
+    uploadFiles.value.push(file.raw)
+  }
 }
 function onFileRemove(file: UploadFile) {
   uploadFiles.value = uploadFiles.value.filter(f => f.name !== file.name)
+  folderUploadCount.value = 0
+}
+function onFolderUploadPick(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files || []).filter((f) => /\.(bmp|png|jpe?g|tiff?|tif)$/i.test(f.name))
+  uploadFiles.value = files
+  folderUploadCount.value = files.length
+  uploadFileList.value = []
+  input.value = ''
+}
+
+function showUploadReport(data: any) {
+  const details: string[] = []
+  if (data.auto_labeled) details.push(`自动标注 ${data.auto_labeled} 张`)
+  if (data.renamed?.length) details.push(`${data.renamed.length} 张同名图片已自动重命名`)
+  if (data.unknown_folders?.length) details.push(`未匹配文件夹：${data.unknown_folders.slice(0, 5).join('、')}`)
+  if (details.length === 0) {
+    ElMessage.success(`成功上传 ${data.uploaded ?? data.items?.length ?? 0} 张图像`)
+    return
+  }
+  ElMessageBox.alert(details.join('\n'), '上传完成', {
+    type: data.unknown_folders?.length ? 'warning' : 'success',
+    confirmButtonText: '知道了',
+  })
 }
 
 async function handleUpload() {
@@ -492,11 +538,12 @@ async function handleUpload() {
   try {
     const { data } = await imageApi.upload(projectId, uploadFiles.value, (pct) => {
       uploadProgress.value = pct
-    })
-    ElMessage.success(`成功上传 ${data.length} 张图像`)
+    }, autoLabelByFolder.value)
+    showUploadReport(data)
     showUpload.value = false
     uploadFiles.value = []
     uploadFileList.value = []
+    folderUploadCount.value = 0
     uploadProgress.value = 0
     loadProject()
     loadImages(1)
@@ -713,5 +760,21 @@ function randomColor() {
   display: flex;
   justify-content: center;
   margin-top: 24px;
+}
+.cls-upload-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e6ebf2;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.folder-upload-hint {
+  margin-top: 8px;
+  color: #606266;
+  font-size: 12px;
 }
 </style>

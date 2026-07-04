@@ -10,7 +10,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -20,12 +20,69 @@ from ..config import settings
 from ..models.project import Project
 from ..models.image import Image
 from ..models.annotation import Annotation
-from ..schemas.image import ImageOut, ImageListOut, ImageStatusUpdate
+from ..models.defect_class import DefectClass
+from ..schemas.image import ImageOut, ImageListOut, ImageStatusUpdate, ImageUploadOut, FolderLabelOut
 
 router = APIRouter(prefix="/api", tags=["图像管理"])
 
 # 支持的图像格式
 ALLOWED_EXTS = {".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+
+
+def _normalize_upload_rel_path(filename: str | None) -> str:
+    if not filename:
+        return ""
+    parts = [p.strip() for p in filename.replace("\\", "/").split("/") if p.strip() and p not in (".", "..")]
+    return "/".join(parts)
+
+
+def _display_name_from_rel_path(rel_path: str) -> str:
+    name = Path(rel_path).name
+    return name[:300] if name else f"{uuid.uuid4().hex}.img"
+
+
+def _next_unique_display_name(original: str, used_lower: set[str]) -> tuple[str, bool]:
+    candidate = original
+    stem = Path(original).stem or "image"
+    suffix = Path(original).suffix
+    n = 2
+    renamed = False
+    while candidate.lower() in used_lower:
+        candidate = f"{stem}_dup{n}{suffix}"
+        n += 1
+        renamed = True
+    used_lower.add(candidate.lower())
+    return candidate, renamed
+
+
+def _class_id_from_folder(rel_path: str, class_name_to_id: dict[str, int]) -> tuple[int | None, str | None]:
+    parts = [p.strip() for p in rel_path.replace("\\", "/").split("/") if p.strip()]
+    if len(parts) < 2:
+        return None, None
+    folders = parts[:-1]
+    for folder in reversed(folders):
+        cid = class_name_to_id.get(folder.casefold())
+        if cid is not None:
+            return cid, folder
+    return None, folders[-1] if folders else None
+
+
+def _image_out(img: Image, annotation_count: int = 0) -> ImageOut:
+    return ImageOut(
+        id=img.id,
+        project_id=img.project_id,
+        filename=img.filename,
+        source_relative_path=img.source_relative_path,
+        width=img.width,
+        height=img.height,
+        file_size=img.file_size,
+        status=img.status,
+        annotator=img.annotator,
+        reviewer=img.reviewer,
+        created_at=img.created_at,
+        annotation_count=annotation_count,
+        class_id=img.class_id,
+    )
 
 
 def _make_thumbnail(src_path: Path, thumb_path: Path, max_size: int = 256):
@@ -42,10 +99,11 @@ def _make_thumbnail(src_path: Path, thumb_path: Path, max_size: int = 256):
     cv2.imwrite(str(thumb_path), img)
 
 
-@router.post("/projects/{project_id}/images/upload", response_model=list[ImageOut])
+@router.post("/projects/{project_id}/images/upload", response_model=ImageUploadOut)
 async def upload_images(
     project_id: int,
     files: list[UploadFile] = File(...),
+    auto_label_by_folder: bool = Form(default=False),
     db: Session = Depends(get_db),
 ):
     """批量上传图像"""
@@ -54,18 +112,35 @@ async def upload_images(
         raise HTTPException(status_code=404, detail="项目不存在")
 
     uploaded = []
+    renamed: list[dict] = []
+    unknown_folders: set[str] = set()
+    matched_classes: dict[str, int] = {}
+    auto_labeled = 0
     project_dir = settings.upload_path / str(project_id)
     thumb_dir = project_dir / "thumbs"
     project_dir.mkdir(parents=True, exist_ok=True)
     thumb_dir.mkdir(parents=True, exist_ok=True)
 
     max_size = settings.MAX_UPLOAD_SIZE
+    class_name_to_id: dict[str, int] = {}
+    class_id_to_name: dict[int, str] = {}
+    if project.task_type == "cls":
+        classes = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
+        class_name_to_id = {c.name.strip().casefold(): c.id for c in classes}
+        class_id_to_name = {c.id: c.name for c in classes}
+    used_names = {
+        name.lower()
+        for (name,) in db.query(Image.filename).filter(Image.project_id == project_id).all()
+        if name
+    }
 
     for file in files:
         # 检查格式
-        if not file.filename:
+        source_rel_path = _normalize_upload_rel_path(file.filename)
+        if not source_rel_path:
             continue
-        ext = Path(file.filename).suffix.lower()
+        display_original = _display_name_from_rel_path(source_rel_path)
+        ext = Path(display_original).suffix.lower()
         if ext not in ALLOWED_EXTS:
             continue
 
@@ -109,18 +184,37 @@ async def upload_images(
         # 生成缩略图
         _make_thumbnail(save_path, thumb_path, settings.THUMB_SIZE)
 
+        display_name, did_rename = _next_unique_display_name(display_original, used_names)
+        if did_rename:
+            renamed.append({"original": display_original, "new": display_name})
+
+        class_id = None
+        status = "unlabeled"
+        if auto_label_by_folder and project.task_type == "cls":
+            class_id, folder_name = _class_id_from_folder(source_rel_path, class_name_to_id)
+            if class_id is not None:
+                status = "labeled"
+                auto_labeled += 1
+                class_name = class_id_to_name.get(class_id, str(class_id))
+                matched_classes[class_name] = matched_classes.get(class_name, 0) + 1
+            elif folder_name:
+                unknown_folders.add(folder_name)
+
         # 写数据库
         rel_path = f"{project_id}/{unique_name}"
         rel_thumb = f"{project_id}/thumbs/{unique_name}.jpg"
         image = Image(
             project_id=project_id,
-            filename=file.filename,
+            filename=display_name,
+            source_relative_path=source_rel_path if "/" in source_rel_path else None,
             file_path=rel_path,
             thumb_path=rel_thumb,
             width=w,
             height=h,
             file_size=len(content),
             content_hash=content_hash,
+            class_id=class_id,
+            status=status,
         )
         db.add(image)
         db.flush()
@@ -128,22 +222,14 @@ async def upload_images(
 
     db.commit()
 
-    return [
-        ImageOut(
-            id=img.id,
-            project_id=img.project_id,
-            filename=img.filename,
-            width=img.width,
-            height=img.height,
-            file_size=img.file_size,
-            status=img.status,
-            annotator=img.annotator,
-            reviewer=img.reviewer,
-            created_at=img.created_at,
-            annotation_count=0,
-        )
-        for img in uploaded
-    ]
+    return ImageUploadOut(
+        items=[_image_out(img, 0) for img in uploaded],
+        uploaded=len(uploaded),
+        auto_labeled=auto_labeled,
+        renamed=renamed,
+        unknown_folders=sorted(unknown_folders),
+        matched_classes=matched_classes,
+    )
 
 
 @router.get("/projects/{project_id}/images", response_model=ImageListOut)
@@ -153,14 +239,27 @@ def list_images(
     page_size: int = Query(default=50, ge=1, le=1000),
     status: str = Query(default=None, description="按标注状态过滤"),
     class_id: int | None = Query(default=None, description="按图像分类 id 过滤（cls 项目专用）"),
+    class_ids: str | None = Query(default=None, description="按多个图像分类 id 过滤，逗号分隔（cls 项目专用）"),
     db: Session = Depends(get_db),
 ):
     """获取图像列表（分页）"""
     query = db.query(Image).filter(Image.project_id == project_id)
     if status:
         query = query.filter(Image.status == status)
-    if class_id is not None:
-        query = query.filter(Image.class_id == class_id)
+    parsed_class_ids: list[int] = []
+    if class_ids:
+        for raw in class_ids.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                parsed_class_ids.append(int(raw))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效 class_ids: {class_ids}")
+    elif class_id is not None:
+        parsed_class_ids.append(class_id)
+    if parsed_class_ids:
+        query = query.filter(Image.class_id.in_(parsed_class_ids))
 
     total = query.count()
     images = (
@@ -183,23 +282,7 @@ def list_images(
     else:
         ann_counts = {}
 
-    items = [
-        ImageOut(
-            id=img.id,
-            project_id=img.project_id,
-            filename=img.filename,
-            width=img.width,
-            height=img.height,
-            file_size=img.file_size,
-            status=img.status,
-            annotator=img.annotator,
-            reviewer=img.reviewer,
-            created_at=img.created_at,
-            annotation_count=ann_counts.get(img.id, 0),
-            class_id=img.class_id,
-        )
-        for img in images
-    ]
+    items = [_image_out(img, ann_counts.get(img.id, 0)) for img in images]
 
     return ImageListOut(total=total, page=page, page_size=page_size, items=items)
 
@@ -260,6 +343,56 @@ def update_image_status(
 
     db.commit()
     return {"ok": True}
+
+
+@router.post("/projects/{project_id}/images/label-by-folder", response_model=FolderLabelOut)
+def label_images_by_folder(
+    project_id: int,
+    body: dict | None = None,
+    db: Session = Depends(get_db),
+):
+    """按上传时的相对文件夹名给 cls 项目图片打标签。默认只处理未标注图片。"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.task_type != "cls":
+        raise HTTPException(status_code=400, detail=f"仅分类项目支持按文件夹名标注，当前 task_type={project.task_type}")
+
+    only_unlabeled = True if body is None else bool(body.get("only_unlabeled", True))
+    classes = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
+    class_name_to_id = {c.name.strip().casefold(): c.id for c in classes}
+    class_id_to_name = {c.id: c.name for c in classes}
+
+    q = db.query(Image).filter(Image.project_id == project_id, Image.source_relative_path.isnot(None))
+    if only_unlabeled:
+        q = q.filter(Image.class_id.is_(None))
+    images = q.all()
+
+    updated = 0
+    skipped = 0
+    unknown_folders: set[str] = set()
+    matched_classes: dict[str, int] = {}
+    for img in images:
+        class_id, folder_name = _class_id_from_folder(img.source_relative_path or "", class_name_to_id)
+        if class_id is None:
+            skipped += 1
+            if folder_name:
+                unknown_folders.add(folder_name)
+            continue
+        img.class_id = class_id
+        if img.status != "reviewed":
+            img.status = "labeled"
+        updated += 1
+        class_name = class_id_to_name.get(class_id, str(class_id))
+        matched_classes[class_name] = matched_classes.get(class_name, 0) + 1
+
+    db.commit()
+    return FolderLabelOut(
+        updated=updated,
+        skipped=skipped,
+        unknown_folders=sorted(unknown_folders),
+        matched_classes=matched_classes,
+    )
 
 
 @router.put("/projects/{project_id}/images/batch-class")

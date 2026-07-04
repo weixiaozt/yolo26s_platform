@@ -113,6 +113,7 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
             images_data.append({
                 "zip_filename": zip_img_name,
                 "original_filename": img.filename,
+                "source_relative_path": img.source_relative_path,
                 "width": img.width,
                 "height": img.height,
                 "status": img.status,
@@ -215,6 +216,7 @@ def export_full_project_to_zip(project_id: int, db: Session, out_path: Path) -> 
                 "old_id": img.id,
                 "zip_filename": zip_img_name,
                 "original_filename": img.filename,
+                "source_relative_path": img.source_relative_path,
                 "width": img.width,
                 "height": img.height,
                 "file_size": img.file_size,
@@ -423,6 +425,7 @@ def import_full_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
             image = Image(
                 project_id=project.id,
                 filename=img_info.get("original_filename", safe_name),
+                source_relative_path=img_info.get("source_relative_path"),
                 file_path=f"{project.id}/{new_name}",
                 width=img_info.get("width", 0),
                 height=img_info.get("height", 0),
@@ -646,6 +649,7 @@ def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
             image = Image(
                 project_id=project.id,
                 filename=img_info.get("original_filename", zip_name),
+                source_relative_path=img_info.get("source_relative_path"),
                 file_path=rel_path,
                 width=img_info.get("width", 0),
                 height=img_info.get("height", 0),
