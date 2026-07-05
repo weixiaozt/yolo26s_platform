@@ -92,6 +92,29 @@
           </el-button>
           <div>仅处理未标注图片，不覆盖已有标签。</div>
         </div>
+        <div class="infer-label-box">
+          <div class="infer-label-title">推理标注</div>
+          <el-select
+            v-model="inferModelIdx"
+            size="small"
+            style="width:100%;margin-bottom:8px"
+            :disabled="inferModels.length===0"
+            placeholder="选择推理模型"
+          >
+            <el-option v-for="(m,i) in inferModels" :key="i" :label="m.label" :value="i" />
+          </el-select>
+          <el-button
+            type="primary"
+            size="small"
+            style="width:100%"
+            :loading="inferLoading"
+            :disabled="inferModels.length===0 || selected.size===0"
+            @click="runInferClassSelected"
+          >
+            推理标注选中图
+          </el-button>
+          <div class="infer-label-tip">仅处理选中图片，默认跳过已有标签。</div>
+        </div>
         <div class="filter-strip">
           <span>类别筛选</span>
           <b v-if="classFilters.length > 0">已选 {{ classFilters.length }} 类</b>
@@ -154,9 +177,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { projectApi, type DefectClass, type ProjectStats } from '../api/project'
 import { imageApi, type ImageInfo } from '../api/image'
+import { annotationApi, type InferenceModelInfo } from '../api/annotation'
 
 const props = defineProps<{ projectId: string }>()
 const router = useRouter()
@@ -188,6 +212,10 @@ const classFilterText = computed(() => {
 const saveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
 const saveStateText = computed(() => ({ idle: '', saving: '保存中…', saved: '已保存', error: '保存失败' }[saveState.value]))
 const folderLabeling = ref(false)
+const inferModels = ref<InferenceModelInfo[]>([])
+const inferModelIdx = ref(0)
+const inferLoading = ref(false)
+const selectedInferModel = computed(() => inferModels.value[inferModelIdx.value] || null)
 
 const stats = computed(() => {
   const total = project.value?.total_images || 0
@@ -207,6 +235,16 @@ async function loadClassStats() {
     }
     classCounts.value = m
   } catch {}
+}
+
+async function loadInferModels() {
+  try {
+    const { data } = await annotationApi.listInferenceModels(parseInt(props.projectId))
+    inferModels.value = data.filter(m => m.model_format === 'pytorch' && m.model_path?.endsWith('.pt'))
+    inferModelIdx.value = 0
+  } catch {
+    inferModels.value = []
+  }
 }
 
 function classColor(cid: number) {
@@ -362,6 +400,53 @@ async function applyClass(classId: number | null) {
   }
 }
 
+async function runInferClassSelected() {
+  if (selected.value.size === 0) {
+    ElMessage.info('请先选择要推理标注的图片')
+    return
+  }
+  if (!selectedInferModel.value) {
+    ElMessage.warning('当前项目没有可用的 best.pt 模型')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `将对选中的 ${selected.value.size} 张图片执行分类推理标注，默认跳过已有标签的图片。`,
+      '推理标注',
+      { confirmButtonText: '开始标注', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  inferLoading.value = true
+  try {
+    const m = selectedInferModel.value
+    const { data } = await annotationApi.inferClassBatch({
+      project_id: parseInt(props.projectId),
+      image_ids: Array.from(selected.value),
+      task_id: m.task_id,
+      model_path: m.model_path,
+      only_unlabeled: true,
+    })
+
+    selected.value.clear()
+    selected.value = new Set()
+    await loadProject()
+    await loadClassStats()
+    await loadPage()
+
+    ElMessage.success(
+      `推理标注完成：更新 ${data.updated} 张，跳过已有 ${data.skipped_existing} 张，未匹配 ${data.skipped_unmatched} 张，失败 ${data.failed} 张`,
+    )
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '推理标注失败')
+  } finally {
+    inferLoading.value = false
+  }
+}
+
 async function runFolderLabel() {
   folderLabeling.value = true
   try {
@@ -411,6 +496,7 @@ function goBack() { router.push(`/project/${props.projectId}`) }
 
 onMounted(async () => {
   await loadProject()
+  await loadInferModels()
   if (project.value?.task_type === 'cls') {
     await loadPage()
     await loadClassStats()
@@ -519,6 +605,25 @@ onBeforeUnmount(() => {})
 }
 .folder-label-box div {
   color: #8fa6bf;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.infer-label-box {
+  padding: 8px 6px;
+  margin-bottom: 10px;
+  border: 1px solid #34504a;
+  border-radius: 6px;
+  background: #1f332d;
+}
+.infer-label-title {
+  color: #d8f3e6;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.infer-label-tip {
+  margin-top: 6px;
+  color: #8fbfaf;
   font-size: 11px;
   line-height: 1.4;
 }

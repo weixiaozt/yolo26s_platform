@@ -336,6 +336,8 @@ def update_image_status(
         raise HTTPException(status_code=400, detail=f"无效状态: {body.status}")
 
     image.status = body.status
+    if body.status == "reviewed":
+        db.query(Annotation).filter(Annotation.image_id == image_id).delete()
     if body.annotator is not None:
         image.annotator = body.annotator
     if body.reviewer is not None:

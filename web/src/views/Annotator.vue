@@ -34,6 +34,24 @@
         <el-button size="small" type="danger" :disabled="annotations.length===0" @click="clearAll">清空</el-button>
       </div>
       <div class="toolbar-right">
+        <el-select
+          v-model="inferModelIdx"
+          size="small"
+          class="infer-model-select"
+          :disabled="inferModels.length===0"
+          placeholder="选择推理模型"
+        >
+          <el-option v-for="(m,i) in inferModels" :key="i" :label="m.label" :value="i" />
+        </el-select>
+        <el-button
+          size="small"
+          type="primary"
+          :loading="inferLoading"
+          :disabled="inferModels.length===0 || !currentImage"
+          @click="runInferCurrent"
+        >
+          推理标注
+        </el-button>
         <span class="save-indicator" :class="saveState">{{ saveStateText }}</span>
         <el-button v-if="currentImage?.status!=='reviewed'" @click="markAsOk" size="small" type="success">标记OK</el-button>
         <el-button v-else @click="unmarkOk" size="small" type="warning">取消OK</el-button>
@@ -106,7 +124,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { fabric } from 'fabric'
 import { projectApi, type DefectClass } from '../api/project'
 import { imageApi, type ImageInfo } from '../api/image'
-import { annotationApi, type AnnotationData, type Point } from '../api/annotation'
+import { annotationApi, type AnnotationData, type Point, type InferenceModelInfo } from '../api/annotation'
 
 const props = defineProps<{ projectId: string; imageId: string }>()
 const router = useRouter()
@@ -118,8 +136,12 @@ const defectClasses = ref<DefectClass[]>([])
 const annotations = ref<AnnotationData[]>([])
 const selectedClassId = ref<number>(0)
 const selectedAnnIdx = ref(-1)
-const currentTool = ref('polygon')
+const currentTool = ref('select')
 const brushSize = ref(2)
+const inferModels = ref<InferenceModelInfo[]>([])
+const inferModelIdx = ref(0)
+const inferLoading = ref(false)
+const selectedInferModel = computed(() => inferModels.value[inferModelIdx.value] || null)
 // 切工具 / 切类别 / 切图 时重置 Shift 追加锚点——避免追加到不相关的旧标注
 watch(currentTool,()=>{lastBrushAnnIdx=-1;lastBrushPts=[]})
 watch(selectedClassId,()=>{lastBrushAnnIdx=-1;lastBrushPts=[]})
@@ -382,7 +404,7 @@ function onWindowResize(){
 }
 
 onMounted(async()=>{
-  await loadProject();await loadImageList();initCanvas();await loadImageAndAnnotations()
+  await loadProject();await loadInferModels();await loadImageList();initCanvas();await loadImageAndAnnotations()
   window.addEventListener('keydown',onKD);window.addEventListener('keyup',onKU)
   window.addEventListener('beforeunload',onBeforeUnload)
   window.addEventListener('resize',onWindowResize)
@@ -421,6 +443,79 @@ async function loadProject(){
 async function loadImageList(){
   const{data}=await imageApi.list(parseInt(props.projectId),{page:1,page_size:999})
   imageList.value=data.items
+}
+
+async function loadInferModels(){
+  try{
+    const{data}=await annotationApi.listInferenceModels(parseInt(props.projectId))
+    inferModels.value=data.filter(m=>m.model_format==='pytorch'&&m.model_path?.endsWith('.pt'))
+    inferModelIdx.value=0
+  }catch{
+    inferModels.value=[]
+  }
+}
+
+async function runInferCurrent(){
+  if(!currentImage.value)return
+  if(!selectedInferModel.value){
+    ElMessage.warning('当前项目没有可用的 best.pt 模型')
+    return
+  }
+  inferLoading.value=true
+  try{
+    const m=selectedInferModel.value
+    const{data}=await annotationApi.inferCurrent({
+      image_id:currentImageId.value,
+      project_id:parseInt(props.projectId),
+      task_id:m.task_id,
+      model_path:m.model_path,
+    })
+    if(!data.annotations.length){
+      ElMessage.info(data.skipped?`没有可用结果，跳过 ${data.skipped} 个未匹配类别`:'未检出缺陷')
+      return
+    }
+    const inferred=data.annotations.map(a=>({
+      class_id:a.class_id,
+      polygon:sanitizePolygon(a.polygon).map(origToDisp),
+      bbox:a.bbox,
+      area:a.area,
+    }))
+    if(!(await ensureCanAddDefect()))return
+
+    let mode:'replace'|'append'=annotations.value.length>0?'append':'replace'
+    if(annotations.value.length>0){
+      try{
+        await ElMessageBox.confirm(
+          `推理得到 ${inferred.length} 个标注。请选择写入方式。`,
+          '推理标注',
+          {
+            confirmButtonText:'替换当前标注',
+            cancelButtonText:'追加到当前标注',
+            distinguishCancelAndClose:true,
+            type:'warning',
+          },
+        )
+        mode='replace'
+      }catch(action:any){
+        if(action==='cancel')mode='append'
+        else return
+      }
+    }
+
+    pushUndo()
+    annotations.value=mode==='replace'?inferred:[...annotations.value,...inferred]
+    setLocalImageStatus('labeled',annotations.value.length)
+    dirty.value=true
+    selectedAnnIdx.value=-1
+    removeVertexHandles()
+    renderAnnotations()
+    scheduleAutoSave()
+    ElMessage.success(`已生成 ${inferred.length} 个推理标注${data.skipped?`，跳过 ${data.skipped} 个`:''}`)
+  }catch(e:any){
+    ElMessage.error(e?.response?.data?.detail||'推理标注失败')
+  }finally{
+    inferLoading.value=false
+  }
 }
 
 function initCanvas(){
@@ -612,16 +707,18 @@ function onPolyClick(p:{x:number;y:number}){
   else drawingPoints.push({x:p.x,y:p.y})
   drawDotFixed(p.x,p.y)
 }
-function finishPolygon(){
+async function finishPolygon(){
   if(!currentImage.value||drawingPoints.length<3){cancelDrawing();return}
+  if(!(await ensureCanAddDefect())){cancelDrawing();return}
   const W=dispW(),H=dispH()
   addAnn(drawingPoints.map(p=>({x:p.x/W,y:p.y/H})));cancelDrawing()
 }
 
 // ====== 涂抹 ======
-function finishBrush(append:boolean=false){
+async function finishBrush(append:boolean=false){
   isBrushing=false;cleanTmp()
   if(!currentImage.value||brushPts.length<2)return
+  if(!(await ensureCanAddDefect())){brushPts=[];return}
   const W=dispW(),H=dispH()
   // Shift 追加：拼接上次笔迹 + 本次笔迹，重新 rasterContour 拟合（rasterContour
   // 会在两笔末尾与下一笔开头之间画连线，自动桥接两段）。仅当上次 brush
@@ -657,8 +754,9 @@ function onPolylineClick(p:{x:number;y:number}){
   else drawingPoints.push({x:p.x,y:p.y})
   drawDotFixed(p.x,p.y)
 }
-function finishPolyline(){
+async function finishPolyline(){
   if(!currentImage.value||drawingPoints.length<2){cancelDrawing();return}
+  if(!(await ensureCanAddDefect())){cancelDrawing();return}
   const W=dispW(),H=dispH()
   const poly=rasterContour(drawingPoints,brushSize.value,W,H)
   if(poly.length>=3)addAnn(poly);cancelDrawing()
@@ -672,10 +770,11 @@ function drawCirclePrev(p:{x:number;y:number}){
   const ci=new fabric.Circle({left:circleStart.x-r,top:circleStart.y-r,radius:r,fill:c+'33',stroke:c,strokeWidth:1,selectable:false,evented:false})
   ;(ci as any)._tmp=true;canvas.add(ci);canvas.requestRenderAll()
 }
-function finishCircle(p:{x:number;y:number}){
+async function finishCircle(p:{x:number;y:number}){
   if(!currentImage.value||!circleStart){circleStart=null;cleanTmp();return}
   const r=Math.sqrt((p.x-circleStart.x)**2+(p.y-circleStart.y)**2)
   if(r<2){circleStart=null;cleanTmp();return}
+  if(!(await ensureCanAddDefect())){circleStart=null;cleanTmp();return}
   const W=dispW(),H=dispH()
   const poly:Point[]=[];for(let i=0;i<32;i++){const a=2*Math.PI*i/32;poly.push({x:Math.max(0,Math.min(1,(circleStart.x+r*Math.cos(a))/W)),y:Math.max(0,Math.min(1,(circleStart.y+r*Math.sin(a))/H))})}
   addAnn(poly);circleStart=null;cleanTmp()
@@ -690,13 +789,14 @@ function drawRectPrev(p:{x:number;y:number}){
   const r=new fabric.Rect({left:x,top:y,width:w,height:h,fill:c+'33',stroke:c,strokeWidth:1,selectable:false,evented:false})
   ;(r as any)._tmp=true;canvas.add(r);canvas.requestRenderAll()
 }
-function finishRect(p:{x:number;y:number}){
+async function finishRect(p:{x:number;y:number}){
   if(!currentImage.value||!rectStart){rectStart=null;cleanTmp();return}
   const W=dispW(),H=dispH()
   const x1=Math.min(rectStart.x,p.x),y1=Math.min(rectStart.y,p.y)
   const x2=Math.max(rectStart.x,p.x),y2=Math.max(rectStart.y,p.y)
   if(x2-x1<3||y2-y1<3){rectStart=null;cleanTmp();return} // 太小忽略
   // 4 点多边形：左上 → 右上 → 右下 → 左下
+  if(!(await ensureCanAddDefect())){rectStart=null;cleanTmp();return}
   const poly:Point[]=[
     {x:x1/W,y:y1/H},{x:x2/W,y:y1/H},{x:x2/W,y:y2/H},{x:x1/W,y:y2/H},
   ]
@@ -730,24 +830,56 @@ function finishBoxEraser(){
 }
 
 // ====== 标记OK / 取消OK ======
+function setLocalImageStatus(status:ImageInfo['status'], annotationCount=annotations.value.length){
+  if(currentImage.value){
+    currentImage.value.status=status
+    currentImage.value.annotation_count=annotationCount
+  }
+  const il=imageList.value.find(i=>i.id===currentImageId.value)
+  if(il){
+    il.status=status
+    il.annotation_count=annotationCount
+  }
+}
+
+async function ensureCanAddDefect(){
+  if(currentImage.value?.status!=='reviewed')return true
+  try{
+    await ElMessageBox.confirm(
+      '当前图片已标记为 OK，添加缺陷会取消 OK 状态，并按缺陷样本参与训练。是否继续？',
+      '取消 OK 标记',
+      {confirmButtonText:'继续标注缺陷',cancelButtonText:'取消',type:'warning'},
+    )
+    setLocalImageStatus(annotations.value.length>0?'labeled':'unlabeled')
+    return true
+  }catch{
+    return false
+  }
+}
+
 async function markAsOk(){
   if(!currentImage.value)return
+  if(annotations.value.length>0){
+    try{
+      await ElMessageBox.confirm(
+        `当前已有 ${annotations.value.length} 个缺陷标注。标记 OK 会清空这些标注，并按 OK 负样本参与训练。是否继续？`,
+        '标记 OK',
+        {confirmButtonText:'清空并标记 OK',cancelButtonText:'取消',type:'warning'},
+      )
+    }catch{return}
+  }
   // 清空标注并保存到数据库（OK=无缺陷的负样本）
   pushUndo(); annotations.value=[]; dirty.value=false
   await annotationApi.save(currentImageId.value,[])
   await imageApi.updateStatus(currentImageId.value,'reviewed')
-  currentImage.value.status='reviewed'
-  const il=imageList.value.find(i=>i.id===currentImageId.value)
-  if(il){il.status='reviewed';il.annotation_count=0}
+  setLocalImageStatus('reviewed',0)
   renderAnnotations(); ElMessage.success('已标记为OK（负样本）')
 }
 async function unmarkOk(){
   if(!currentImage.value)return
   const newStatus=annotations.value.length>0?'labeled':'unlabeled'
   await imageApi.updateStatus(currentImageId.value,newStatus)
-  currentImage.value.status=newStatus
-  const il=imageList.value.find(i=>i.id===currentImageId.value)
-  if(il)il.status=newStatus
+  setLocalImageStatus(newStatus)
   ElMessage.info('已取消OK标记')
 }
 async function clearAll(){
@@ -777,6 +909,7 @@ function addAnn(polygon:Point[]){
   if(cleaned.length<3)return // 至少 3 点
   pushUndo()
   annotations.value.push({class_id:selectedClassId.value,polygon:cleaned})
+  setLocalImageStatus('labeled',annotations.value.length)
   dirty.value=true
   renderAnnotations()
   scheduleAutoSave()
@@ -981,8 +1114,9 @@ function copyAnn(){
   clipboard={class_id:ann.class_id,polygon:ann.polygon.map(dispToOrig)}
   ElMessage.info('已复制')
 }
-function pasteAnn(){
+async function pasteAnn(){
   if(!clipboard||!currentImage.value)return
+  if(!(await ensureCanAddDefect()))return
   const W=dispW(),H=dispH()
   // 像素偏移 20px，转归一化
   const dx=20/W,dy=20/H
@@ -992,6 +1126,7 @@ function pasteAnn(){
   }))
   pushUndo()
   annotations.value.push({class_id:clipboard.class_id,polygon:newPoly})
+  setLocalImageStatus('labeled',annotations.value.length)
   dirty.value=true
   selectedAnnIdx.value=annotations.value.length-1
   renderAnnotations()
@@ -1040,11 +1175,11 @@ async function handleSave(opt:{silent?:boolean;immediate?:boolean}={}){
     const il=imageList.value.find(i=>i.id===imgId)
     if(il){
       const cur=currentImage.value
-      if(cur?.id===imgId && cur.status!=='reviewed'){
-        il.status=annotations.value.length>0?'labeled':'unlabeled'
+      il.status=safeAnns.length>0?'labeled':'unlabeled'
+      if(cur?.id===imgId){
         cur.status=il.status
       }
-      il.annotation_count=annotations.value.length
+      il.annotation_count=safeAnns.length
     }
     if(!opt.silent) ElMessage.success('保存成功')
   }catch(e:any){
@@ -1108,6 +1243,7 @@ function imgSC(img:ImageInfo){return{'sc-u':img.status==='unlabeled','sc-l':img.
 .annotator{display:flex;flex-direction:column;height:100vh;background:#1a1a1a;color:#ddd;outline:none}
 .toolbar{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:#2d2d2d;border-bottom:1px solid #444;min-height:48px;gap:8px;flex-wrap:wrap}
 .toolbar-left,.toolbar-center,.toolbar-right{display:flex;align-items:center;gap:6px}
+.infer-model-select{width:220px}
 .filename{font-weight:500;font-size:14px}
 .brush-size-ctrl{display:flex;align-items:center;gap:6px}
 .ctrl-label{font-size:12px;color:#aaa}.ctrl-value{font-size:12px;color:#aaa;min-width:36px}

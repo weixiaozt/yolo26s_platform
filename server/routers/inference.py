@@ -10,7 +10,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Body
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -556,6 +556,331 @@ async def run_inference(
         conf=conf, iou=iou, resize_size=resize_size, device=device, db=db,
     )
 
+def _annotation_default_device() -> str:
+    try:
+        import torch
+        return "0" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def _annotation_model_context(project_id: int, task_id: int, model_path: str, db: Session):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(404, "项目不存在")
+
+    task = None
+    if task_id:
+        task = (
+            db.query(TrainTask)
+            .filter(TrainTask.id == task_id, TrainTask.project_id == project_id)
+            .first()
+        )
+        if not task:
+            raise HTTPException(404, "训练任务不存在")
+
+    if not model_path:
+        if task and task.best_model_path and Path(task.best_model_path).exists():
+            model_path = task.best_model_path
+        else:
+            tasks = (
+                db.query(TrainTask)
+                .filter(
+                    TrainTask.project_id == project_id,
+                    TrainTask.status.in_(["completed", "cancelled"]),
+                    TrainTask.best_model_path.isnot(None),
+                )
+                .order_by(func.coalesce(TrainTask.finished_at, TrainTask.created_at).desc())
+                .all()
+            )
+            for t in tasks:
+                if t.best_model_path and Path(t.best_model_path).exists():
+                    task = t
+                    task_id = t.id
+                    model_path = t.best_model_path
+                    break
+
+    model_path = _resolve_model_path(model_path, task_id, db)
+
+    task_type = project.task_type or "seg"
+    if task and task.config:
+        task_type = task.config.get("task_type", task_type)
+
+    return project, task, task_type, model_path
+
+
+def _read_project_image(image_id: int, db: Session):
+    from ..models.image import Image as ImageModel
+
+    image = db.query(ImageModel).filter(ImageModel.id == image_id).first()
+    if not image:
+        raise HTTPException(404, "图像不存在")
+
+    upload_root = settings.upload_path.resolve()
+    fp = Path(image.file_path)
+    fp = fp.resolve() if fp.is_absolute() else (settings.upload_path / image.file_path).resolve()
+    try:
+        fp.relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(400, "非法路径")
+    if not fp.exists():
+        raise HTTPException(404, f"图像文件不存在: {fp}")
+
+    content = fp.read_bytes()
+    img_array = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_UNCHANGED)
+    if img_array is None:
+        raise HTTPException(400, "无法读取图像")
+
+    if img_array.ndim == 2:
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+    elif img_array.ndim == 3 and img_array.shape[2] == 4:
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
+
+    return image, img_array, content
+
+
+def _class_maps(project_id: int, db: Session):
+    classes = db.query(DefectClass).filter(DefectClass.project_id == project_id).all()
+    return {
+        "index_to_id": {int(c.class_index): int(c.id) for c in classes},
+        "name_to_id": {str(c.name): int(c.id) for c in classes},
+        "id_to_name": {int(c.id): str(c.name) for c in classes},
+    }
+
+
+def _box_polygon(x1, y1, x2, y2, w, h):
+    return [
+        {"x": max(0, min(1, float(x1) / w)), "y": max(0, min(1, float(y1) / h))},
+        {"x": max(0, min(1, float(x2) / w)), "y": max(0, min(1, float(y1) / h))},
+        {"x": max(0, min(1, float(x2) / w)), "y": max(0, min(1, float(y2) / h))},
+        {"x": max(0, min(1, float(x1) / w)), "y": max(0, min(1, float(y2) / h))},
+    ]
+
+
+def _mask_polygon(mask, w: int, h: int):
+    if mask is None:
+        return []
+    m = (mask > 0).astype(np.uint8)
+    contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return []
+    cnt = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(cnt) < 3:
+        return []
+    eps = max(1.0, cv2.arcLength(cnt, True) * 0.002)
+    approx = cv2.approxPolyDP(cnt, eps, True).reshape(-1, 2)
+    if len(approx) > 120:
+        step = len(approx) / 120
+        approx = np.array([approx[int(i * step)] for i in range(120)])
+    return [
+        {"x": max(0, min(1, float(x) / w)), "y": max(0, min(1, float(y) / h))}
+        for x, y in approx
+    ]
+
+
+def _poly_meta(poly, w: int, h: int):
+    xs = [p["x"] * w for p in poly]
+    ys = [p["y"] * h for p in poly]
+    return {
+        "bbox": {
+            "x1": int(min(xs)),
+            "y1": int(min(ys)),
+            "x2": int(max(xs)),
+            "y2": int(max(ys)),
+        },
+        "area": float(cv2.contourArea(np.array([[p["x"] * w, p["y"] * h] for p in poly], dtype=np.float32))),
+    }
+
+
+@router.post("/annotation-current")
+def infer_annotation_current(body: dict = Body(...), db: Session = Depends(get_db)):
+    image_id = int(body.get("image_id") or 0)
+    task_id = int(body.get("task_id") or 0)
+    model_path = body.get("model_path") or ""
+    device = body.get("device") or _annotation_default_device()
+
+    image, img_array, content = _read_project_image(image_id, db)
+    project_id = int(body.get("project_id") or image.project_id)
+
+    project, task, task_type, mp = _annotation_model_context(project_id, task_id, model_path, db)
+    if task_type == "cls":
+        raise HTTPException(400, "分类项目请使用批量推理标注")
+
+    h, w = img_array.shape[:2]
+    maps = _class_maps(project_id, db)
+    model = _get_model(mp, task_type=task_type, device=device)
+
+    annotations = []
+    skipped = 0
+
+    if task_type == "obb":
+        pred = model.predict(img_array, verbose=False, conf=0.35, iou=0.5, device=device if device != "cpu" else "cpu")
+        r0 = pred[0] if pred else None
+        obb = getattr(r0, "obb", None) if r0 is not None else None
+        if obb is not None and obb.xyxyxyxy is not None and len(obb) > 0:
+            polys = obb.xyxyxyxy.cpu().numpy() if hasattr(obb.xyxyxyxy, "cpu") else obb.xyxyxyxy
+            cls_ids = obb.cls.cpu().numpy().astype(int) if hasattr(obb.cls, "cpu") else obb.cls
+            confs = obb.conf.cpu().numpy() if hasattr(obb.conf, "cpu") else obb.conf
+            for poly_px, cls_idx, conf in zip(polys, cls_ids, confs):
+                class_id = maps["index_to_id"].get(int(cls_idx))
+                if not class_id:
+                    skipped += 1
+                    continue
+                poly = [
+                    {"x": max(0, min(1, float(p[0]) / w)), "y": max(0, min(1, float(p[1]) / h))}
+                    for p in poly_px
+                ]
+                meta = _poly_meta(poly, w, h)
+                annotations.append({
+                    "class_id": class_id,
+                    "class_name": maps["id_to_name"].get(class_id),
+                    "confidence": round(float(conf), 4),
+                    "polygon": poly,
+                    **meta,
+                })
+    else:
+        crop_size, overlap = 640, 0.2
+        use_morphology, dilate_kernel, erode_kernel = False, 3, 3
+        if task and task.config:
+            crop_size = task.config.get("crop_size", crop_size)
+            overlap = task.config.get("overlap", overlap)
+            use_morphology = task.config.get("use_morphology", False)
+            dilate_kernel = task.config.get("dilate_kernel", 3)
+            erode_kernel = task.config.get("erode_kernel", 3)
+
+        from core.inference import infer_single_image
+        result = infer_single_image(
+            model=model,
+            image=img_array,
+            crop_size=crop_size,
+            overlap=overlap,
+            conf_thresh=0.35,
+            iou_thresh=0.5,
+            resize_size=None,
+            device=device,
+            use_morphology=use_morphology,
+            dilate_kernel=dilate_kernel,
+            erode_kernel=erode_kernel,
+        )
+
+        for i in range(result["num_detections"]):
+            cls_idx = int(result["classes"][i])
+            class_id = maps["index_to_id"].get(cls_idx)
+            if not class_id:
+                skipped += 1
+                continue
+
+            box = result["boxes"][i]
+            poly = []
+            if task_type == "seg" and i < len(result.get("masks", [])):
+                poly = _mask_polygon(result["masks"][i], w, h)
+            if len(poly) < 3:
+                poly = _box_polygon(box[0], box[1], box[2], box[3], w, h)
+
+            meta = _poly_meta(poly, w, h)
+            annotations.append({
+                "class_id": class_id,
+                "class_name": maps["id_to_name"].get(class_id),
+                "confidence": round(float(result["scores"][i]), 4),
+                "polygon": poly,
+                **meta,
+            })
+
+    return {
+        "image_id": image_id,
+        "task_type": task_type,
+        "model_path": mp,
+        "count": len(annotations),
+        "skipped": skipped,
+        "annotations": annotations,
+    }
+
+
+@router.post("/annotation-cls-batch")
+def infer_annotation_cls_batch(body: dict = Body(...), db: Session = Depends(get_db)):
+    from ..models.image import Image as ImageModel
+
+    project_id = int(body.get("project_id") or 0)
+    image_ids = body.get("image_ids") or []
+    task_id = int(body.get("task_id") or 0)
+    model_path = body.get("model_path") or ""
+    only_unlabeled = bool(body.get("only_unlabeled", True))
+    annotator = body.get("annotator")
+    device = body.get("device") or _annotation_default_device()
+
+    if not image_ids:
+        raise HTTPException(400, "image_ids 不能为空")
+
+    project, task, task_type, mp = _annotation_model_context(project_id, task_id, model_path, db)
+    if task_type != "cls":
+        raise HTTPException(400, "仅分类项目支持批量推理标注")
+
+    model = _get_model(mp, task_type="cls", device=device)
+    maps = _class_maps(project_id, db)
+    model_names = _resolve_class_names(model, project_id, db)
+
+    images = (
+        db.query(ImageModel)
+        .filter(ImageModel.project_id == project_id, ImageModel.id.in_(image_ids))
+        .all()
+    )
+
+    updated = 0
+    skipped_existing = 0
+    skipped_unmatched = 0
+    failed = 0
+    items = []
+
+    for img in images:
+        if only_unlabeled and img.class_id is not None:
+            skipped_existing += 1
+            continue
+
+        try:
+            _, img_array, _ = _read_project_image(img.id, db)
+            pred = model.predict(img_array, verbose=False, device=device if device != "cpu" else "cpu")
+            r0 = pred[0] if pred else None
+            probs = getattr(r0, "probs", None) if r0 is not None else None
+            if probs is None:
+                failed += 1
+                continue
+
+            top1 = int(probs.top1)
+            conf = float(probs.top1conf)
+            pred_name = model_names.get(top1, f"C{top1}")
+            class_id = maps["name_to_id"].get(pred_name) or maps["index_to_id"].get(top1)
+
+            if not class_id:
+                skipped_unmatched += 1
+                items.append({"image_id": img.id, "filename": img.filename, "matched": False, "pred_name": pred_name})
+                continue
+
+            img.class_id = class_id
+            if img.status != "reviewed":
+                img.status = "labeled"
+            if annotator:
+                img.annotator = annotator
+
+            updated += 1
+            items.append({
+                "image_id": img.id,
+                "filename": img.filename,
+                "class_id": class_id,
+                "class_name": maps["id_to_name"].get(class_id),
+                "confidence": round(conf, 4),
+                "matched": True,
+            })
+        except Exception:
+            failed += 1
+
+    db.commit()
+    return {
+        "updated": updated,
+        "skipped_existing": skipped_existing,
+        "skipped_unmatched": skipped_unmatched,
+        "failed": failed,
+        "items": items,
+    }
 
 @router.post("/run-by-image-id")
 def run_inference_by_image_id(
