@@ -92,6 +92,7 @@
                   导出标注
                 </el-button>
                 <el-button
+                  v-if="isAdmin"
                   class="card-action card-action--red"
                   size="small"
                   round
@@ -229,6 +230,13 @@ const creating = ref(false)
 const exportingKey = ref<string | null>(null)
 const exportProgress = ref(0)
 const importing = ref(false)
+const isAdmin = computed(() => {
+  try {
+    return JSON.parse(localStorage.getItem('user') || '{}')?.role === 'admin'
+  } catch {
+    return false
+  }
+})
 
 const groupedProjects = computed(() => {
   return GROUP_ORDER

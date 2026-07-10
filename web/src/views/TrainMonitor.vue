@@ -45,7 +45,7 @@
         <el-table-column label="操作" width="120">
           <template #default="{row}">
             <el-button v-if="row.status==='training'||row.status==='preparing'" type="warning" text size="small" @click.stop="cancelTask(row.id)">取消</el-button>
-            <el-button v-if="row.status==='completed'||row.status==='failed'||row.status==='cancelled'" type="danger" text size="small" @click.stop="deleteTask(row.id)">删除</el-button>
+            <el-button v-if="isAdmin && (row.status==='completed'||row.status==='failed'||row.status==='cancelled')" type="danger" text size="small" @click.stop="deleteTask(row.id)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -213,6 +213,13 @@ import { trainApi, type TrainTask, type EpochLog } from '../api/train'
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
+const isAdmin = computed(() => {
+  try {
+    return JSON.parse(localStorage.getItem('user') || '{}')?.role === 'admin'
+  } catch {
+    return false
+  }
+})
 const projectId = parseInt(props.id)
 
 const tasks = ref<TrainTask[]>([])

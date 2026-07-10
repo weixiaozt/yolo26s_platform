@@ -14,10 +14,29 @@ if project_root not in sys.path:
 from celery import Celery
 from ..config import settings
 
+broker_url = settings.CELERY_BROKER_URL or settings.REDIS_URL
+result_backend = settings.CELERY_RESULT_BACKEND or settings.REDIS_URL
+broker_transport_options = {}
+
+if broker_url.startswith("filesystem://"):
+    broker_dir = Path(settings.CELERY_FILESYSTEM_BROKER_DIR)
+    if not broker_dir.is_absolute():
+        broker_dir = Path(settings.STORAGE_ROOT).resolve() / broker_dir
+    queue_dir = broker_dir / "queue"
+    processed_dir = broker_dir / "processed"
+    for d in (queue_dir, processed_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    broker_transport_options = {
+        "data_folder_in": str(queue_dir),
+        "data_folder_out": str(queue_dir),
+        "processed_folder": str(processed_dir),
+        "store_processed": True,
+    }
+
 celery_app = Celery(
     "yolo_seg",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL,
+    broker=broker_url,
+    backend=result_backend or None,
 )
 
 celery_app.conf.update(
@@ -32,6 +51,7 @@ celery_app.conf.update(
     # 同一时间只跑一个训练任务（GPU 资源限制）
     worker_concurrency=1,
     worker_prefetch_multiplier=1,
+    broker_transport_options=broker_transport_options,
 )
 
 # 显式导入任务模块（确保任务被注册）

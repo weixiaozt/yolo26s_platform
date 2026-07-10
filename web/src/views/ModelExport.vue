@@ -174,7 +174,7 @@
         <el-table-column label="操作" width="130" fixed="right">
           <template #default="{row}">
             <a v-if="row.status==='completed'" :href="dlUrl(`/api/export/download/exported/${row.id}`)" target="_blank" style="color:#409EFF;font-size:13px;text-decoration:none;margin-right:12px">下载</a>
-            <el-button v-if="row.status!=='exporting'" type="danger" text size="small" @click="deleteExport(row.id)">删除</el-button>
+            <el-button v-if="isAdmin && row.status!=='exporting'" type="danger" text size="small" @click="deleteExport(row.id)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -200,6 +200,13 @@ import api from '../api/index'
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
+const isAdmin = computed(() => {
+  try {
+    return JSON.parse(localStorage.getItem('user') || '{}')?.role === 'admin'
+  } catch {
+    return false
+  }
+})
 
 interface TaskInfo {
   task_id:number

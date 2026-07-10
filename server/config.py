@@ -15,6 +15,9 @@ class Settings(BaseSettings):
 
     # ---- Redis ----
     REDIS_URL: str = "redis://localhost:6379/0"
+    CELERY_BROKER_URL: str = ""
+    CELERY_RESULT_BACKEND: str = ""
+    CELERY_FILESYSTEM_BROKER_DIR: str = "storage/celery-broker"
 
     # ---- 文件存储 ----
     STORAGE_ROOT: str = str(Path(__file__).parent.parent / "storage")
@@ -29,12 +32,17 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000", "http://localhost:80"]
 
+    # ---- Offline license ----
+    VPVISION_LICENSE_REQUIRED: bool = False
+    VPVISION_LICENSE_FILE: str = "config/license.dat"
+    VPVISION_WEB_DIST: str = ""
+
     # ---- 图像 ----
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024   # 50MB
     THUMB_SIZE: int = 256                      # 缩略图最大边长
 
     class Config:
-        env_file = ".env"
+        env_file = ("config/.env", ".env")
         env_file_encoding = "utf-8"
 
     @property

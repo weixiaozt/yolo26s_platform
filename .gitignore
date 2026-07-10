@@ -45,3 +45,6 @@ kernel.errors.txt
 
 # 打包产物
 *.zip
+
+# Local admin-private files: private keys, licenses, machine codes
+admin_private/

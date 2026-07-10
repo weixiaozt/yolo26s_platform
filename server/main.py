@@ -30,11 +30,13 @@ except Exception as _e:
 
 from .config import settings
 from .database import init_db
+from .services.license_service import enforce_license_if_required
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时建表 + 创建默认管理员"""
+    enforce_license_if_required()
     init_db()
     # 创建默认管理员
     from .database import SessionLocal
@@ -83,22 +85,9 @@ AUTH_WHITELIST = {"/api/auth/login", "/api/health", "/docs", "/redoc", "/openapi
 # 管理员专属动作：普通用户(role=user)命中则 403。集中在此便于审计。
 # 普通用户仍可 上传/标注/训练/推理/看数据/导出项目数据包；下列为"删除·改结构·导出模型·导入合并"等敏感动作。
 _ADMIN_ONLY = [
-    ("POST",   re.compile(r"^/api/projects$")),                       # 新建项目
-    ("PUT",    re.compile(r"^/api/projects/\d+$")),                   # 改项目设置
-    ("DELETE", re.compile(r"^/api/projects/\d+$")),                   # 删项目
-    ("POST",   re.compile(r"^/api/projects/import-package$")),        # 导入项目包
-    ("POST",   re.compile(r"^/api/projects/\d+/merge-package$")),     # 合并标注包
-    ("POST",   re.compile(r"^/api/projects/\d+/convert-task-type$")), # 转换任务类型
-    ("POST",   re.compile(r"^/api/projects/\d+/classes$")),           # 新增缺陷类别
-    ("PUT",    re.compile(r"^/api/projects/\d+/classes/\d+$")),       # 修改缺陷类别
-    ("DELETE", re.compile(r"^/api/projects/\d+/classes/\d+$")),       # 删除缺陷类别
-    ("DELETE", re.compile(r"^/api/images/\d+$")),                     # 删除单张图
-    ("POST",   re.compile(r"^/api/images/batch-delete$")),            # 批量删图
-    ("DELETE", re.compile(r"^/api/train/tasks/\d+$")),                # 删训练任务
-    ("POST",   re.compile(r"^/api/export/run$")),                     # 导出模型
-    ("DELETE", re.compile(r"^/api/export/\d+$")),                     # 删导出记录
-    ("GET",    re.compile(r"^/api/export/download/")),                # 下载模型(.pt/导出件)
-    ("POST",   re.compile(r"^/api/import/")),                         # 批量导入标注(VOC/cls 等)
+    ("DELETE", re.compile(r"^/api/projects/\d+$")),       # 普通用户不能删除项目
+    ("DELETE", re.compile(r"^/api/train/tasks/\d+$")),    # 删除训练任务会移除权重
+    ("DELETE", re.compile(r"^/api/export/\d+$")),         # 删除导出记录会移除模型产物
 ]
 
 
@@ -164,7 +153,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from pathlib import Path as _Path
 
-_dist = _Path(__file__).resolve().parent.parent / "web" / "dist"
+_dist = _Path(settings.VPVISION_WEB_DIST).resolve() if settings.VPVISION_WEB_DIST else _Path(__file__).resolve().parent.parent / "web" / "dist"
 if _dist.is_dir():
     _assets = _dist / "assets"
     if _assets.is_dir():
