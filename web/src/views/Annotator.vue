@@ -111,7 +111,22 @@
       <span>缩放:{{ Math.round(zoomLevel*100) }}%</span>
       <span v-if="viewRot!==0" style="color:#E6A23C">视图旋转:{{ viewRot }}°</span>
       <span v-if="currentImageIdx>=0">{{ currentImageIdx+1 }}/{{ imageList.length }}</span>
-      <span style="margin-left:auto;color:#666">空格+拖拽移动 · 滚轮缩放</span>
+      <span class="status-shortcuts">空格+拖拽移动 · 滚轮缩放</span>
+      <div v-if="isSegTask" class="seg-view-controls">
+        <el-switch
+          v-model="showAnnotationLayer"
+          size="small"
+          inline-prompt
+          active-text="显"
+          inactive-text="隐"
+        />
+        <el-radio-group v-model="imageChannel" size="small" class="channel-radio">
+          <el-radio-button label="O">O</el-radio-button>
+          <el-radio-button label="R">R</el-radio-button>
+          <el-radio-button label="G">G</el-radio-button>
+          <el-radio-button label="B">B</el-radio-button>
+        </el-radio-group>
+      </div>
     </div>
   </div>
 </template>
@@ -134,10 +149,13 @@ const currentImage = ref<ImageInfo|null>(null)
 const imageList = ref<ImageInfo[]>([])
 const defectClasses = ref<DefectClass[]>([])
 const annotations = ref<AnnotationData[]>([])
+const projectTaskType = ref<'seg'|'det'|'cls'|'obb'>('seg')
 const selectedClassId = ref<number>(0)
 const selectedAnnIdx = ref(-1)
 const currentTool = ref('select')
 const brushSize = ref(2)
+const showAnnotationLayer = ref(true)
+const imageChannel = ref<'O'|'R'|'G'|'B'>('O')
 const inferModels = ref<InferenceModelInfo[]>([])
 const inferModelIdx = ref(0)
 const inferLoading = ref(false)
@@ -145,6 +163,21 @@ const selectedInferModel = computed(() => inferModels.value[inferModelIdx.value]
 // 切工具 / 切类别 / 切图 时重置 Shift 追加锚点——避免追加到不相关的旧标注
 watch(currentTool,()=>{lastBrushAnnIdx=-1;lastBrushPts=[]})
 watch(selectedClassId,()=>{lastBrushAnnIdx=-1;lastBrushPts=[]})
+watch(showAnnotationLayer,(visible)=>{
+  if(suppressViewControlWatch)return
+  if(!isSegTask.value)return
+  if(!visible){
+    selectedAnnIdx.value=-1
+    removeVertexHandles()
+    cancelDrawing()
+  }
+  renderAnnotations()
+})
+watch(imageChannel,()=>{
+  if(suppressViewControlWatch)return
+  if(!isSegTask.value||!currentImage.value)return
+  loadCanvasBackground(currentImageId.value,false)
+})
 const isDrawing = ref(false)
 const saving = ref(false)
 const saveState = ref<'idle'|'pending'|'saving'|'saved'|'error'>('idle')
@@ -163,6 +196,7 @@ const hasPrev = computed(()=>currentImageIdx.value>0)
 const hasNext = computed(()=>currentImageIdx.value<imageList.value.length-1)
 const statusLabel = computed(()=>({unlabeled:'未标注',labeling:'标注中',labeled:'已标注',reviewed:'OK'})[currentImage.value?.status||'']||'')
 const statusTagType = computed(()=>({unlabeled:'info',labeling:'warning',labeled:'',reviewed:'success'})[currentImage.value?.status||''] as any||'info')
+const isSegTask = computed(()=>projectTaskType.value==='seg')
 const showBrushSize = computed(()=>['brush','circle','polyline','eraser'].includes(currentTool.value))
 const toolHint = computed(()=>{
   if(spaceDown.value) return '按住空格拖拽移动画布'
@@ -193,6 +227,8 @@ let editHandles:fabric.Circle[]=[]
 let clipboard:AnnotationData|null=null   // 始终存原图坐标系（不随视图旋转失效）
 let autoSaveTimer:any=null
 let isPanning=false,lastPanX=0,lastPanY=0
+let bgLoadSeq=0
+let suppressViewControlWatch=false
 
 // ================================================================
 // 视图旋转：只旋转显示与编辑坐标系，图片文件和 DB 里的标注始终是原图坐标。
@@ -228,6 +264,59 @@ function placeBgImage(img:fabric.Image){
   else if(viewRot.value===270)top=iw
   img.set({angle:viewRot.value,left,top})
   img.setCoords()
+}
+
+function makeChannelElement(src:HTMLImageElement,mode:'R'|'G'|'B',done:(el:HTMLImageElement)=>void){
+  const w=src.naturalWidth||src.width
+  const h=src.naturalHeight||src.height
+  const cv=document.createElement('canvas')
+  cv.width=w;cv.height=h
+  const ctx=cv.getContext('2d')
+  if(!ctx){done(src);return}
+  try{
+    ctx.drawImage(src,0,0,w,h)
+    const imgData=ctx.getImageData(0,0,w,h)
+    const offset=mode==='R'?0:mode==='G'?1:2
+    for(let i=0;i<imgData.data.length;i+=4){
+      const v=imgData.data[i+offset]
+      imgData.data[i]=v
+      imgData.data[i+1]=v
+      imgData.data[i+2]=v
+    }
+    ctx.putImageData(imgData,0,0)
+    const out=new Image()
+    out.onload=()=>done(out)
+    out.src=cv.toDataURL('image/png')
+  }catch{
+    done(src)
+  }
+}
+
+function loadCanvasBackground(imageId:number,fit=true){
+  if(!canvas)return
+  const reqSeq=++bgLoadSeq
+  const reqImageId=imageId
+  const mode=imageChannel.value
+  const url=imageApi.getFileUrl(reqImageId,false)
+  const src=new Image()
+  src.crossOrigin='anonymous'
+  src.onload=()=>{
+    if(!canvas||reqSeq!==bgLoadSeq||reqImageId!==currentImageId.value)return
+    const addImage=(el:HTMLImageElement)=>{
+      if(!canvas||reqSeq!==bgLoadSeq||reqImageId!==currentImageId.value)return
+      canvas.getObjects().filter(o=>(o as any)._bg).forEach(o=>canvas!.remove(o))
+      const img=new fabric.Image(el,{selectable:false,evented:false,originX:'left',originY:'top'})
+      ;(img as any)._bg=true
+      placeBgImage(img)
+      canvas.add(img)
+      canvas.sendToBack(img)
+      if(fit)zoomFit()
+      else canvas.requestRenderAll()
+    }
+    if(mode==='O')addImage(src)
+    else makeChannelElement(src,mode,addImage)
+  }
+  src.src=url
 }
 
 function rotateView(delta:number){
@@ -437,6 +526,7 @@ function onBeforeUnload(e:BeforeUnloadEvent){
 
 async function loadProject(){
   const{data}=await projectApi.get(parseInt(props.projectId))
+  projectTaskType.value=(data.task_type||'seg') as 'seg'|'det'|'cls'|'obb'
   defectClasses.value=data.defect_classes
   if(data.defect_classes.length>0)selectedClassId.value=data.defect_classes[0].id!
 }
@@ -535,6 +625,7 @@ function initCanvas(){
       isPanning=true;lastPanX=opt.e.clientX;lastPanY=opt.e.clientY;canvas!.setCursor('grab');return
     }
     if(opt.e.button!==0)return
+    if(isSegTask.value&&!showAnnotationLayer.value)return
     const p=canvas!.getPointer(opt.e),tool=currentTool.value
     // select 工具：点 polygon 选中（顶点 handle 由 fabric 自己处理 evented）
     if(tool==='select'){
@@ -602,20 +693,16 @@ async function loadImageAndAnnotations(){
   if(!canvas)return
   currentImage.value=imageList.value.find(i=>i.id===currentImageId.value)||null
   viewRot.value=rotMap.get(currentImageId.value)??0
+  suppressViewControlWatch=true
+  showAnnotationLayer.value=true
+  imageChannel.value='O'
+  suppressViewControlWatch=false
   removeVertexHandles()
   canvas.clear();canvas.backgroundColor='#2a2a2a'
   // 锁定本次请求对应的 imageId；如果用户在 await 期间切了图，丢弃这次返回，
   // 否则旧请求的标注会把新图覆盖（实际表现：切到新图却显示前一张的标注）
   const reqImageId=currentImageId.value
-  const url=imageApi.getFileUrl(reqImageId,false)
-  fabric.Image.fromURL(url,(img)=>{
-    if(!canvas)return
-    if(reqImageId!==currentImageId.value)return  // 已切图，旧 img 不要放上去
-    img.set({selectable:false,evented:false,originX:'left',originY:'top'})
-    ;(img as any)._bg=true
-    placeBgImage(img)
-    canvas.add(img);canvas.sendToBack(img);zoomFit()
-  },{crossOrigin:'anonymous'})
+  loadCanvasBackground(reqImageId,true)
   try{
     const{data}=await annotationApi.get(reqImageId)
     if(reqImageId!==currentImageId.value)return  // 切图了，本次响应作废
@@ -638,6 +725,11 @@ async function loadImageAndAnnotations(){
 function renderAnnotations(){
   if(!canvas||!currentImage.value)return
   canvas.getObjects().filter(o=>(o as any)._ann).forEach(o=>canvas!.remove(o))
+  if(isSegTask.value&&!showAnnotationLayer.value){
+    removeVertexHandles()
+    canvas.requestRenderAll()
+    return
+  }
   const W=dispW(),H=dispH()
   // select 工具下让 polygon 可拖动整体平移（其他工具下保持 evented=true 用于点击选中，但禁拖）
   const isSelectTool=currentTool.value==='select'
@@ -957,6 +1049,7 @@ function highlightSelected(){
 function showVertexHandles(idx:number){
   removeVertexHandles()
   if(!canvas||!currentImage.value)return
+  if(isSegTask.value&&!showAnnotationLayer.value)return
   const ann=annotations.value[idx]
   if(!ann)return
   const W=dispW(),H=dispH()
@@ -1247,6 +1340,8 @@ function imgSC(img:ImageInfo){return{'sc-u':img.status==='unlabeled','sc-l':img.
 .filename{font-weight:500;font-size:14px}
 .brush-size-ctrl{display:flex;align-items:center;gap:6px}
 .ctrl-label{font-size:12px;color:#aaa}.ctrl-value{font-size:12px;color:#aaa;min-width:36px}
+.seg-view-controls{display:flex;align-items:center;gap:8px;margin-left:8px}
+.channel-radio{white-space:nowrap}
 .main-area{display:flex;flex:1;overflow:hidden}
 .nav-panel{width:200px;background:#252525;border-right:1px solid #444;display:flex;flex-direction:column}
 .nav-header{padding:10px 12px;font-size:13px;font-weight:600;border-bottom:1px solid #333;color:#aaa}
@@ -1274,7 +1369,8 @@ function imgSC(img:ImageInfo){return{'sc-u':img.status==='unlabeled','sc-l':img.
 .ann-item{display:flex;align-items:center;gap:6px;padding:6px 12px;cursor:pointer;transition:background .15s}
 .ann-item:hover{background:#333}.ann-item.selected{background:#1a3a5c}
 .ann-label{flex:1;font-size:12px}.ann-points{font-size:11px;color:#888}
-.statusbar{display:flex;gap:24px;padding:4px 16px;background:#2d2d2d;border-top:1px solid #444;font-size:12px;color:#888}
+.statusbar{display:flex;align-items:center;gap:24px;padding:4px 16px;background:#2d2d2d;border-top:1px solid #444;font-size:12px;color:#888}
+.status-shortcuts{margin-left:auto;color:#666}
 .save-indicator{font-size:12px;min-width:80px;text-align:right;transition:color .2s}
 .save-indicator.idle{color:transparent}
 .save-indicator.pending{color:#E6A23C}
