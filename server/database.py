@@ -112,6 +112,12 @@ def init_db():
             "COMMENT '上传时的相对路径，用于按文件夹名快速标注'",
             "images.source_relative_path",
         ),
+        # YOLO26/10 导出 head 模式；legacy 保留既有 YOLO11 与历史记录行为
+        (
+            "ALTER TABLE exported_models ADD COLUMN head_mode VARCHAR(20) NOT NULL DEFAULT 'legacy' "
+            "COMMENT 'legacy=旧链路, native=one-to-one, compat=one-to-many+运行时NMS'",
+            "exported_models.head_mode",
+        ),
     ]
     # MySQL 在字段/索引/约束已存在时分别报这些错；其它异常视为真正失败要打印出来。
     _ALREADY_EXISTS_TOKENS = ("Duplicate column", "Duplicate key", "Duplicate", "already exists", "errno: 121", "1060", "1061", "1826")

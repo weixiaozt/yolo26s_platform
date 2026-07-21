@@ -18,6 +18,7 @@ class ExportedModel(Base):
     imgsz = Column(Integer, default=640)
     half = Column(Integer, default=0)                        # 0=FP32, 1=FP16, 2=INT8
     nms = Column(Integer, default=0)                         # 0=不带 NMS, 1=内嵌 NMS（输出 1×300×6+nm）
+    head_mode = Column(String(20), default="legacy")         # legacy / native / compat
     status = Column(String(20), default="pending")           # pending/exporting/completed/failed
     error_message = Column(String(2000))
     created_at = Column(DateTime, server_default=func.now())

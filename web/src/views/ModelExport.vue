@@ -81,12 +81,23 @@
             需安装 nncf: <code>pip install nncf</code>，导出时间较长（2~5 分钟）。
           </div>
         </el-alert>
-        <el-form-item v-if="!isClsTask && exportFormat !== 'tensorrt'" label="内嵌 NMS">
-          <el-switch v-model="nms" :disabled="isEnd2endModel" />
-          <span v-if="isEnd2endModel" style="font-size:12px;color:#E6A23C;margin-left:8px">
-            YOLO26/10 架构自带 NMS，无需此选项（输出已是 <code>(1,300,6+nm)</code>）
-          </span>
-          <span v-else style="font-size:12px;color:#909399;margin-left:8px">
+        <el-form-item v-if="isEnd2endModel && exportFormat !== 'tensorrt'" label="YOLO26 模式">
+          <el-radio-group v-model="headMode">
+            <el-radio label="compat">兼容/高召回（推荐）</el-radio>
+            <el-radio label="native">原生端到端（速度优先）</el-radio>
+          </el-radio-group>
+          <div style="font-size:12px;color:#909399;line-height:1.6;margin-top:4px">
+            <template v-if="headMode === 'compat'">
+              使用 one-to-many head + 运行时标准 NMS，PT/OpenVINO 共用相同 conf/iou 参数。
+            </template>
+            <template v-else>
+              使用 one-to-one NMS-free 输出，部署简单，但小目标召回率可能略低。
+            </template>
+          </div>
+        </el-form-item>
+        <el-form-item v-else-if="!isClsTask && exportFormat !== 'tensorrt'" label="内嵌 NMS">
+          <el-switch v-model="nms" />
+          <span style="font-size:12px;color:#909399;margin-left:8px">
             开启后输出 <code>(1,300,6+nm)</code> 已过滤好的 box，部署方无需自己写 NMS（推理 +3~8ms/张）
           </span>
         </el-form-item>
@@ -137,6 +148,13 @@
         <el-table-column label="格式" width="110">
           <template #default="{row}">
             <el-tag :type="fmtTagType(row.export_format)" size="small">{{ row.export_format.toUpperCase() }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="Head 模式" width="105">
+          <template #default="{row}">
+            <el-tag v-if="row.head_mode === 'compat'" type="success" size="small">兼容</el-tag>
+            <el-tag v-else-if="row.head_mode === 'native'" type="warning" size="small">原生</el-tag>
+            <span v-else style="color:#aaa;font-size:12px">原有</span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="100">
@@ -222,7 +240,7 @@ interface TaskInfo {
   finished_at:string|null
   created_at:string|null
 }
-interface ExportInfo { id:number; task_id:number; source_type:string; export_format:string; export_path:string|null; file_size_mb:number; imgsz:number; half:boolean; precision:string; nms:boolean; status:string; error_message:string|null; created_at:string|null }
+interface ExportInfo { id:number; task_id:number; source_type:string; export_format:string; export_path:string|null; file_size_mb:number; imgsz:number; half:boolean; precision:string; nms:boolean; head_mode:'legacy'|'native'|'compat'; status:string; error_message:string|null; created_at:string|null }
 
 const tasks = ref<TaskInfo[]>([])
 const exports = ref<ExportInfo[]>([])
@@ -232,6 +250,7 @@ const exportFormat = ref('onnx')
 const imgsz = ref(640)
 const precision = ref('fp32')
 const nms = ref(false)
+const headMode = ref<'native'|'compat'>('compat')
 const exporting = ref(false)
 let pollTimer: any = null
 
@@ -265,6 +284,8 @@ async function loadTasks() {
   if (data.length > 0 && !selTaskId.value) {
     selTaskId.value = data[0].task_id
     if (data[0].imgsz) imgsz.value = data[0].imgsz
+    const name = (data[0].model_name || '').toLowerCase()
+    headMode.value = name.includes('yolo26') || name.includes('yolo10') ? 'compat' : 'native'
   }
 }
 
@@ -287,9 +308,12 @@ function onTaskChange() {
   sourceType.value = 'best'
   const t = tasks.value.find(x => x.task_id === selTaskId.value)
   if (t && t.imgsz) imgsz.value = t.imgsz
-  // 切到 end2end 模型时 nms 强制关掉（避免上次选 YOLO11 时打开了的状态残留）
+  // YOLO26 使用独立 head 模式；YOLO11 的既有 NMS 开关不变。
   const name = (t?.model_name || '').toLowerCase()
-  if (name.includes('yolo26') || name.includes('yolo10')) nms.value = false
+  if (name.includes('yolo26') || name.includes('yolo10')) {
+    nms.value = false
+    headMode.value = 'compat'
+  }
 }
 
 // 当前选中任务是否为分类项目（用于隐藏输入尺寸选项）
@@ -326,7 +350,10 @@ async function startExport() {
       imgsz: imgsz.value,
       half: precision.value === 'fp16',
       int8: precision.value === 'int8',
-      nms: nms.value,
+      nms: isEnd2endModel.value ? false : nms.value,
+      head_mode: isEnd2endModel.value
+        ? (exportFormat.value === 'tensorrt' ? 'native' : headMode.value)
+        : 'legacy',
     })
     ElMessage.success('转换任务已启动！')
     await loadExports()

@@ -13,9 +13,9 @@ YOLO26-seg 和 YOLO11-seg 在 ultralytics 里走的是**两条不同的 head 架
 | 维度 | YOLO11-seg | YOLO26-seg |
 |---|---|---|
 | `head.end2end` 默认值 | **False** | **True** |
-| 训练方式 | 经典 one2many + 后处理 NMS | **NMS-free**（one2one 分支内嵌） |
-| `model.export()` 默认输出 shape | `(1, 4+nc+nm, 8400)` 原始候选 | `(1, 300, 6+nm)` **已 NMS 过滤** |
-| 需不需要外部 NMS | **需要** | **不需要**（graph 自带）|
+| 训练方式 | 经典 one2many + 后处理 NMS | **NMS-free**（one2one 分支 + TopK） |
+| `model.export()` 默认输出 shape | `(1, 4+nc+nm, 8400)` 原始候选 | `(1, 300, 6+nm)` **已筛选结果** |
+| 需不需要单图传统 NMS | **需要** | **不需要**（不是 graph 内嵌传统 NMS）|
 | 模型文件大小 (n 系列) | YOLO11n-seg ~5.8MB | YOLO26s-seg ~22MB（n 暂无） |
 
 **这意味着同一份部署代码不能直接换模型** —— 切换 YOLO11→YOLO26 必须改后处理逻辑。
@@ -26,7 +26,7 @@ YOLO26-seg 和 YOLO11-seg 在 ultralytics 里走的是**两条不同的 head 架
 
 理解后面所有内容的前提。
 
-### end2end = "端到端"，指模型自带后处理，无需外部步骤
+### end2end = "端到端"，指 one-to-one head 直接产生 NMS-free 结果
 
 YOLO 检测的完整流水线：
 
@@ -35,7 +35,7 @@ YOLO 检测的完整流水线：
 ```
 
 - **end2end=False**（YOLO11 默认）：模型只负责"forward"，**NMS 必须外部做**
-- **end2end=True**（YOLO10 / YOLO26 默认）：模型把 NMS 这一步**也学进神经网络里了**，输出直接是无重叠 box
+- **end2end=True**（YOLO10 / YOLO26 默认）：one-to-one 分配让结果不再依赖传统 IoU NMS，并通过 TopK 输出最终候选
 
 ### 核心区别：训练时每个目标用几个 anchor
 
@@ -87,11 +87,11 @@ backbone → FPN/PAN ──┬─→ one2many head  (训练用，给丰富梯度
 |---|---|---|
 | 模型权重大小 | 基础大小 | 多一份 head（约 +20%）|
 | 推理 forward 时间 | 标准 | 略慢（多一个 head 计算，但被丢弃）|
-| **NMS 是否必需** | **必需**，自己写或用 OpenCV | **不需要**，模型已保证无重叠 |
-| 输出 shape | `(1, 4+nc+nm, 8400)` 原始候选 | `(1, 300, 6+nm)` 已挑好 |
-| **延迟（含后处理）** | forward + NMS（CPU 上 NMS ~2-10ms）| forward only |
-| 阈值调整 | conf/iou 推理时随便改 | conf 在训练时就定型，推理时只能事后 filter |
-| 边缘 case 行为 | 可调 NMS 阈值找回 / 抑制 | 模型 hard 决策，没救 |
+| **单图传统 NMS 是否必需** | **必需**，自己写或内嵌到导出图 | **不需要** |
+| 输出 shape | `(1, 4+nc+nm, 8400)` 原始候选 | `(1, 300, 6+nm)` one-to-one + TopK |
+| **延迟（含后处理）** | forward + NMS（CPU 上 NMS ~2-10ms）| forward + TopK |
+| 阈值调整 | conf/iou 均可调 | conf 可事后过滤，没有传统 NMS 的 iou 阈值 |
+| 边缘 case 行为 | 可调 NMS 阈值找回 / 抑制 | 可改用 `end2end=False` 的兼容模式 |
 
 ### 形象比喻
 
@@ -100,9 +100,9 @@ backbone → FPN/PAN ──┬─→ one2many head  (训练用，给丰富梯度
 
 ### 这跟选模型的关系
 
-- 如果你的部署代码本来就有一套现成的 NMS（OpenCV 的或自己写的）→ **YOLO11** 更自然，YOLO26 的 NMS 是焊死的你改不了
-- 如果你希望部署代码越简单越好，不想维护 NMS → **YOLO26** 更省事，模型直接吐过滤好的结果
-- 如果你想精细控制 NMS 行为（改 IoU 公式、加类间合并、特殊面积过滤）→ **YOLO11**
+- 如果你的部署代码本来就有一套现成的 NMS → **YOLO11** 或 YOLO26 `end2end=False` 更自然
+- 如果你希望部署代码越简单越好 → YOLO26 原生模式直接输出已筛选结果
+- 如果你想精细控制 NMS 行为 → 使用 YOLO11，或把 YOLO26 切到兼容模式
 - 如果只是想要标准 NMS 行为、性能优先 → 两者都行，看模型大小和精度
 
 ---
@@ -156,27 +156,35 @@ real_dets = detections[0][valid]
 
 ## 4. 避坑指南（部署端必看）
 
-### ❌ 坑 1：在 YOLO26 上加 `nms=True` 导出
+### ❌ 坑 1：保持 `end2end=True` 时直接追加 `nms=True`
 
 ```python
 # 错误做法
 model = YOLO('yolo26s-seg-best.pt')
-model.export(format='openvino', nms=True)  # ← 完全多余
+model.export(format='openvino', end2end=True, nms=True)  # ← 模式冲突
 ```
 
-YOLO26-seg 本身已经 end2end=True，graph 里已经有 NMS 节点。再加 `nms=True` 没意义，可能反而引入冗余包装节点拖慢推理。**正确做法是直接 `nms=False` 或默认导出**。
+YOLO26 原生模式是 one-to-one NMS-free，不应直接叠加传统 NMS。平台现在提供两种互斥的正确模式：
 
-YOLO11-seg 才需要 `nms=True` 选项（因为它本身是非 end2end）。
+```python
+# 原生模式：速度和部署简单优先
+model.export(format='openvino', end2end=True, nms=False)
+
+# 兼容/高召回模式：导出 one-to-many 原始候选，由运行时统一做 NMS
+model.export(format='openvino', end2end=False, nms=False)
+```
+
+YOLO11-seg 保持既有 `nms=True/False` 选项，不受 YOLO26 模式影响。
 
 ### ❌ 坑 2：把 YOLO26 当 YOLO11 用，再做一次 NMS
 
 ```python
 # 错误做法（同事的旧 NMS 代码移植过来）
-detections = ov_model.infer(image)[0]      # YOLO26 输出已 NMS 过
+detections = ov_model.infer(image)[0]      # YOLO26 原生 NMS-free 输出
 boxes_after_nms = my_nms(detections, iou=0.45)  # ← 重做 NMS 是无效操作
 ```
 
-YOLO26 给的 300 个 box 里**没有重叠对**（NMS 已 graph 内执行）。再做一次 NMS 不会改变结果，浪费 CPU。
+原生 one-to-one 输出不需要再做单图传统 NMS。注意：平台滑窗推理中，不同切片之间仍可能产生重复框，因此拼回整图后的跨切片 NMS 必须保留。
 
 **正确做法**：
 ```python
@@ -239,8 +247,9 @@ i7+UHD 集显单帧推理上，YOLO26s 比 YOLO11n 慢估计 1.5~2 倍（未实�
 | 平台默认，全部新项目 | **YOLO11n-seg** — 小、快、跨平台一致性好 |
 | 部署到 i7+UHD 集显，1拖2 双相机 | **YOLO11n-seg** — 800ms 预算下更稳 |
 | 精度要求很高、速度有富余 | **YOLO26s-seg** — 架构更新，mAP 上限通常更高 |
-| 想用 graph 内嵌 NMS 简化部署代码 | YOLO26-seg 天然有 / YOLO11-seg 用 `nms=True` 导出 |
-| 想自己写 NMS / 自定义后处理 | YOLO11-seg `nms=False` 导出（拿 8400 原始候选） |
+| 想直接得到筛选后的固定形状输出 | YOLO26 原生模式，或 YOLO11 用 `nms=True` 导出 |
+| 小缺陷召回优先、规避端到端导出兼容问题 | **YOLO26 兼容模式：`end2end=False, nms=False`，运行时统一 NMS** |
+| 想自己写 NMS / 自定义后处理 | YOLO11，或 YOLO26 `end2end=False, nms=False` |
 
 **保守做法**：先把现有 YOLO11n-seg 部署跑稳，验证业务指标达标；然后用相同数据训一份 YOLO26s-seg 对比 mAP 和速度，再决定要不要切。
 
@@ -337,7 +346,7 @@ for (int i = 0; i < 300; ++i) {
 ## TL;DR
 
 1. **YOLO26-seg + OV 实测可用**，conf 是正常 prob，跟 PT 推理完全一致
-2. **YOLO26-seg 是 end2end 架构**，输出 `(1, 300, 38)` 已 NMS 过滤，不要再做 NMS
-3. **不要在 YOLO26 上加 `nms=True` 导出**，graph 已自带 NMS
-4. **YOLO11n 仍是默认推荐**（小 4 倍、推理更快），YOLO26s 适合精度要求更高的场景
-5. **YOLO11 ↔ YOLO26 切换必须改后处理代码**（输出格式不同），不能直接换模型路径
+2. **YOLO26 原生模式是 one-to-one NMS-free + TopK**，不是 graph 内执行传统 NMS
+3. **小缺陷 OpenVINO 推荐兼容模式**：`end2end=False, nms=False`，由运行时统一 NMS
+4. **YOLO11 继续使用原有导出/NMS链路**，不受 YOLO26 兼容模式影响
+5. **跨滑窗切片的全局 NMS 仍必须保留**

@@ -6,6 +6,7 @@
 import sys
 import threading
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -32,6 +33,7 @@ class ExportRequest(BaseModel):
     half: bool = Field(default=False)                    # FP16
     int8: bool = Field(default=False)                    # INT8 量化（仅 OpenVINO）
     nms: bool = Field(default=False)                     # 内嵌 NMS 节点（仅 onnx/openvino + det/seg/obb）
+    head_mode: Literal["legacy", "native", "compat"] = Field(default="legacy")
 
 
 @router.get("/list")
@@ -57,6 +59,7 @@ def list_exports(task_id: int = 0, project_id: int = 0, db: Session = Depends(ge
             "int8": e.half == 2,
             "precision": {0: "FP32", 1: "FP16", 2: "INT8"}.get(e.half, "FP32"),
             "nms": bool(e.nms),
+            "head_mode": e.head_mode or "legacy",
             "status": e.status,
             "error_message": e.error_message,
             "created_at": e.created_at.isoformat() if e.created_at else None,
@@ -141,18 +144,22 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
     # half 字段是 3 态精度码：0=FP32 / 1=FP16 / 2=INT8
     precision_code = 2 if req.int8 else (1 if req.half else 0)
 
-    # 检查是否已有相同导出（含精度 + nms，避免同 task 不同 nms 选项被误判已存在）
+    # YOLO26 compat 使用运行时 NMS，不改变 YOLO11 的既有内嵌 NMS 开关。
+    requested_nms = req.nms if req.head_mode == "legacy" else False
+
+    # 检查是否已有相同导出（含精度、NMS、head 模式）
     existing = db.query(ExportedModel).filter(
         ExportedModel.task_id == req.task_id,
         ExportedModel.source_type == req.source_type,
         ExportedModel.export_format == req.export_format,
         ExportedModel.imgsz == req.imgsz,
         ExportedModel.half == precision_code,
-        ExportedModel.nms == (1 if req.nms else 0),
+        ExportedModel.nms == (1 if requested_nms else 0),
+        ExportedModel.head_mode == req.head_mode,
         ExportedModel.status == "completed",
     ).first()
     if existing:
-        raise HTTPException(status_code=409, detail="该组合（格式/精度/NMS）已导出，无需重复导出")
+        raise HTTPException(status_code=409, detail="该组合（格式/精度/NMS/head模式）已导出，无需重复导出")
 
     # 创建记录（half: 0=FP32, 1=FP16, 2=INT8）
     record = ExportedModel(
@@ -162,7 +169,8 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
         export_format=req.export_format,
         imgsz=req.imgsz,
         half=precision_code,
-        nms=1 if req.nms else 0,
+        nms=1 if requested_nms else 0,
+        head_mode=req.head_mode,
         status="exporting",
     )
     db.add(record)
@@ -179,14 +187,24 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
             dataset_path = str(Path(task.output_dir) / "dataset")
     threading.Thread(
         target=_do_export,
-        args=(export_id, src_path, req.export_format, req.imgsz, req.half, req.int8, req.nms, dataset_path),
+        args=(export_id, src_path, req.export_format, req.imgsz, req.half, req.int8, req.nms, req.head_mode, dataset_path),
         daemon=True,
     ).start()
 
     return {"id": export_id, "status": "exporting", "message": "导出任务已启动"}
 
 
-def _do_export(export_id: int, src_path: str, fmt: str, imgsz: int, half: bool, int8: bool = False, nms: bool = False, dataset_path: str = None):
+def _do_export(
+    export_id: int,
+    src_path: str,
+    fmt: str,
+    imgsz: int,
+    half: bool,
+    int8: bool = False,
+    nms: bool = False,
+    head_mode: str = "legacy",
+    dataset_path: str = None,
+):
     """后台执行导出"""
     db = SessionLocal()
     try:
@@ -204,6 +222,7 @@ def _do_export(export_id: int, src_path: str, fmt: str, imgsz: int, half: bool, 
             half=half,
             int8=int8,
             nms=nms,
+            head_mode=head_mode,
             dataset_path=dataset_path,
         )
 
@@ -212,6 +231,9 @@ def _do_export(export_id: int, src_path: str, fmt: str, imgsz: int, half: bool, 
             record.error_message = result["error"]
         else:
             record.status = "completed"
+            # 核心层按真实模型 head 归一化后的最终模式，覆盖请求占位值。
+            record.head_mode = result.get("head_mode", head_mode)
+            record.nms = 1 if result.get("nms", nms) else 0
             record.export_path = result.get("export_path")
             record.onnx_path = result.get("onnx_path")
             # 计算文件大小
@@ -307,8 +329,9 @@ def download_exported_model(export_id: int, db: Session = Depends(get_db)):
     elif ep.is_dir():
         # 目录：OpenVINO → 打 zip
         # zip 命名带 record.id，避免同 task + 同格式但不同 nms/精度的多条记录共享缓存
+        mode_tag = f"_{record.head_mode}" if record.head_mode in ("native", "compat") else ""
         nms_tag = "_nms" if record.nms else ""
-        zip_name = f"{tname}_{record.source_type}_{record.export_format}{nms_tag}"
+        zip_name = f"{tname}_{record.source_type}_{record.export_format}{mode_tag}{nms_tag}"
         zip_cache_name = f"{zip_name}_id{record.id}"
         tmp_dir = Path(tempfile.gettempdir()) / "model_downloads"
         tmp_dir.mkdir(exist_ok=True)

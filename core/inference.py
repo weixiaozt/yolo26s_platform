@@ -602,9 +602,15 @@ def _class_aware_nms(
         cls_boxes = boxes[cls_mask]
         cls_scores = scores[cls_mask]
 
+        # cv2.dnn.NMSBoxes 接收 [x, y, width, height]，而项目内部统一使用 xyxy。
+        # 若直接传入 xyxy，x2/y2 会被当作宽高，使越靠右下的框被错误放大并产生伪 IoU。
+        cls_boxes_xywh = cls_boxes.copy()
+        cls_boxes_xywh[:, 2] -= cls_boxes_xywh[:, 0]
+        cls_boxes_xywh[:, 3] -= cls_boxes_xywh[:, 1]
+
         # 使用 OpenCV 的 NMS
         indices = cv2.dnn.NMSBoxes(
-            bboxes=cls_boxes.tolist(),
+            bboxes=cls_boxes_xywh.tolist(),
             scores=cls_scores.tolist(),
             score_threshold=0.0,  # 已经过滤过了
             nms_threshold=iou_thresh

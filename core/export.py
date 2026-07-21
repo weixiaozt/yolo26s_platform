@@ -18,6 +18,36 @@ from pathlib import Path
 from typing import Optional, Callable
 
 
+_HEAD_MODES = {"legacy", "native", "compat"}
+
+
+def _resolve_head_export_args(
+    is_end2end: bool,
+    head_mode: str = "legacy",
+    nms: bool = False,
+) -> tuple[str, dict]:
+    """构造导出 head 参数，确保 YOLO26 兼容模式与 YOLO11 旧链路隔离。
+
+    ``legacy`` 保留旧调用方语义：end2end 模型走原生 one-to-one，普通模型
+    完全遵循原有 ``nms`` 开关。只有真实 end2end head 且显式请求 ``compat``
+    时，才切换到 one-to-many head；传统 NMS 继续由运行时统一执行，保证
+    PT/OpenVINO 使用相同的 conf/iou 参数和后处理实现。
+    """
+    if head_mode not in _HEAD_MODES:
+        raise ValueError(f"不支持的 head_mode: {head_mode}，可选: legacy / native / compat")
+
+    if is_end2end:
+        if head_mode == "compat":
+            return "compat", {"end2end": False}
+        # native/legacy 都保持模型默认的 one-to-one NMS-free head。
+        return "native", {}
+
+    # YOLO11 等非 end2end 模型不得注入 end2end 参数，保持既有导出行为。
+    if nms:
+        return "legacy", {"nms": True, "conf": 0.001}
+    return "legacy", {}
+
+
 def _fix_openvino_compat():
     """OpenVINO 2026+ 移除了 openvino.runtime，注册兼容别名"""
     try:
@@ -37,6 +67,7 @@ def run_export(
     half: bool = False,
     int8: bool = False,
     nms: bool = False,
+    head_mode: str = "legacy",
     simplify: bool = True,
     device: str = None,
     dataset_path: str = None,
@@ -51,6 +82,7 @@ def run_export(
         export_format: 导出格式，可选 "onnx" / "openvino" / "tensorrt"
         imgsz: 输入图像尺寸（默认 640）
         half: 是否使用 FP16 半精度（TensorRT 推荐开启，OpenVINO 慎用）
+        head_mode: head 模式；legacy=旧行为，native=端到端原生，compat=one-to-many+NMS
         simplify: 是否简化 ONNX 模型（默认 True）
         device: 导出设备（OpenVINO 有效），如 "cpu", "gpu", "gpu.0", "npu", "auto"
         dataset_path: 数据集路径（可选），用于 INT8 量化校准
@@ -78,22 +110,29 @@ def run_export(
         progress_callback(1, 4, "加载模型...")
     model = YOLO(str(model_path))
 
-    # YOLO26/10 等 end2end 架构模型 head 自带 NMS，外加 nms=True/conf=0.001 无效
-    # 甚至 conf=0.001 可能被 end2end head 内部 top-K 用掉造成混乱。强制忽略 nms 选项。
+    # 以真实 head 属性判断，不能只依赖模型文件名。
     is_end2end = False
     try:
         is_end2end = bool(getattr(model.model.model[-1], 'end2end', False))
     except Exception:
         pass
-    if nms and is_end2end:
-        print("[export] end2end 模型（YOLO26/10）自带 NMS，忽略 nms/conf 参数")
-        nms = False
+    effective_head_mode, head_export_args = _resolve_head_export_args(
+        is_end2end=is_end2end,
+        head_mode=head_mode,
+        nms=nms,
+    )
+    if effective_head_mode == "compat":
+        print("[export] end2end 模型使用兼容/高召回模式：one-to-many + 运行时 NMS")
+    elif is_end2end:
+        print("[export] end2end 模型使用原生模式：one-to-one NMS-free")
 
     results = {
         "format": export_format,
         "imgsz": imgsz,
         "onnx_path": None,
         "export_path": None,
+        "head_mode": effective_head_mode,
+        "nms": bool(head_export_args.get("nms", False)),
     }
 
     # ---- 第一步：始终先导出 ONNX ----
@@ -103,12 +142,7 @@ def run_export(
     try:
         # 分割模型导出时 simplify 可能导致问题，提供备选方案
         onnx_kwargs = {"format": "onnx", "imgsz": imgsz, "simplify": simplify, "half": False}
-        if nms:
-            onnx_kwargs["nms"] = True
-            # 内嵌 NMS 默认 conf=0.25 会硬过滤 < 0.25 的检测，导致运行时低 conf 阈值不生效。
-            # 降到 0.001 让外部 conf 阈值（如 ultralytics predict(conf=0.15)）正常生效。
-            # 部署端如果直接读 raw output，自行按 det[4] (conf) 过滤即可。
-            onnx_kwargs["conf"] = 0.001
+        onnx_kwargs.update(head_export_args)
         try:
             onnx_path = model.export(**onnx_kwargs)
         except Exception as simplify_error:
@@ -202,12 +236,8 @@ def run_export(
                     "half": half,
                 }
 
-            # nms=True：在 OV 模型里内嵌 NMS 节点，输出从 (1,4+nc+nm,N) 变成 (1,300,6+nm)
-            # 即 [x1,y1,x2,y2,conf,cls,mask_coeff*nm]，部署方无需自己写 NMS。
-            # conf=0.001 把内嵌阈值降到极低，让外部 conf 阈值生效（同 ONNX 上面的注释）。
-            if nms:
-                export_kwargs["nms"] = True
-                export_kwargs["conf"] = 0.001
+            # 与第一阶段 ONNX 使用同一 head/NMS 参数，避免两个产物语义不一致。
+            export_kwargs.update(head_export_args)
 
             ov_path = model2.export(**export_kwargs)
             results["export_path"] = str(ov_path)
