@@ -468,7 +468,9 @@ def run_train(
         patience=patience,
         device=device,
         workers=workers,
-        cache="ram",
+        # 不强制缓存完整图片到内存。大数据集或 OOM 后重建 DataLoader 时，
+        # RAM 缓存会显著放大内存峰值；关闭只影响读取速度，不影响训练精度。
+        cache=False,
         # 数据增广
         hsv_h=augment_hsv_h,
         hsv_s=augment_hsv_s,

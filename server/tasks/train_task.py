@@ -27,6 +27,81 @@ from ..services.dataset_service import (
 from ..config import settings
 
 
+def _format_training_failure(exc: Exception, config: dict, trace_text: str) -> str:
+    """把常见的资源/参数错误转换为可操作的中文提示，并保留技术堆栈。"""
+    config = config or {}
+    detail = f"{exc}\n{trace_text}"
+    detail_lower = detail.lower()
+    model_name = config.get("model_name", "未记录")
+    imgsz = config.get("crop_size", "未记录")
+    batch_size = config.get("batch_size", "未记录")
+    workers = config.get("workers", "未记录")
+    params = (
+        f"当前参数：模型={model_name}，输入尺寸={imgsz}，"
+        f"Batch Size={batch_size}，DataLoader Workers={workers}。"
+    )
+
+    if "cuda out of memory" in detail_lower or "torch.outofmemoryerror" in detail_lower:
+        try:
+            next_batch = max(1, int(batch_size) // 2)
+            batch_tip = f"建议先把 Batch Size 降到 {next_batch} 或更低"
+        except (TypeError, ValueError):
+            batch_tip = "请减小 Batch Size"
+        guidance = (
+            "训练失败：GPU 显存不足。\n"
+            f"{params}\n"
+            f"{batch_tip}，关闭其他占用 GPU 的程序后重新训练。"
+        )
+    elif any(token in detail_lower for token in (
+        "insufficient memory",
+        "outofmemoryerror",
+        "failed to allocate",
+        "paging file is too small",
+        "not enough memory",
+    )):
+        guidance = (
+            "训练失败：系统内存或虚拟内存不足。\n"
+            f"{params}\n"
+            "请将 DataLoader Workers 调低到 0～2，关闭占用内存较大的程序，"
+            "必要时增大 Windows 虚拟内存，然后重新训练。"
+        )
+    elif any(token in detail_lower for token in (
+        "dataloader worker",
+        "worker exited unexpectedly",
+        "broken pipe",
+        "can't start new thread",
+        "cannot start new thread",
+    )):
+        guidance = (
+            "训练失败：数据加载子进程启动或运行异常。\n"
+            f"{params}\n"
+            "请把 DataLoader Workers 改为 0 后重新训练；高配机器稳定后可再逐步增加。"
+        )
+    else:
+        return detail
+
+    return f"{guidance}\n\n技术详情：\n{detail}"
+
+
+def _release_training_resources() -> None:
+    """Celery solo worker 常驻，任务结束后显式回收 CPU/CUDA 缓存。"""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            # 回收 CUDA IPC 缓存；部分环境不支持，失败不影响任务状态。
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception as cleanup_error:
+        print(f"[训练资源清理警告] {cleanup_error}")
+
+
 @celery_app.task(bind=True, name="tasks.run_training_pipeline")
 def run_training_pipeline(self, task_id: int):
     """
@@ -39,6 +114,7 @@ def run_training_pipeline(self, task_id: int):
         sys.path.insert(0, _root)
 
     db = SessionLocal()
+    config = {}
 
     try:
         task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
@@ -323,6 +399,7 @@ def run_training_pipeline(self, task_id: int):
         }
 
     except Exception as e:
+        trace_text = traceback.format_exc()
         task = db.query(TrainTask).filter(TrainTask.id == task_id).first()
         if task:
             # 用户已经 cancel 了：trainer 退出时偶发会在收尾（plot_metrics、保存
@@ -347,10 +424,14 @@ def run_training_pipeline(self, task_id: int):
 
             # 真正训练失败
             task.status = "failed"
-            task.error_message = f"{str(e)}\n{traceback.format_exc()}"
+            failure_config = config or task.config or {}
+            task.error_message = _format_training_failure(e, failure_config, trace_text)
             task.finished_at = datetime.now()
             db.commit()
         return {"status": "failed", "error": str(e)}
 
     finally:
-        db.close()
+        try:
+            db.close()
+        finally:
+            _release_training_resources()
