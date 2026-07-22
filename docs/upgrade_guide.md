@@ -234,6 +234,27 @@ B 路径：解压前没备份就丢了，下次记得先 `git init && git commit
 A 路径：`git log --oneline` 找到升级前那个 hash，`git reset --hard <hash>`
 B 路径：用你升级前的备份 zip 重新解压（建议每次升级前用 7z 把整个目录打个备份）
 
+### Q8: 训练报 `run_train() got an unexpected keyword argument 'workers'`
+这是 `server/` 与 `core/` 版本不一致，或更新代码后 Celery 没重启；和预训练权重是否存在无关。
+
+1. 完整覆盖更新包，不能只复制 `server/` 或模型文件。
+2. 检查实际导入路径和函数签名：
+   ```cmd
+   D:\yolo26s_platform\venv\Scripts\python.exe -c "import inspect,core.train; print(core.train.__file__); print(inspect.signature(core.train.run_train))"
+   ```
+3. 确认签名含 `workers` 后，彻底重启 uvicorn 和 Celery。
+
+### Q9: 训练最终显示 OpenCV `Insufficient memory / Failed to allocate`
+先看完整 traceback。若前面出现 `torch.OutOfMemoryError: CUDA out of memory`，真正原因是 Batch Size 超出显存，OpenCV 只是 Ultralytics 自动重建 DataLoader 时触发的二次内存错误。
+
+- RTX 3060 6GB、640 分割任务建议先用 `batch=8～16`、`workers=0～2`。
+- 4070 Ti 可从 `workers=4` 开始测试；Windows 启动异常时改回 0。
+- 平台从提交 `bdc1582` 起使用 `cache=False`，并在任务成功、失败、取消后主动清理 CPU/CUDA 缓存。
+- 参数调整后新建任务重新训练；失败任务不会自动续跑。
+
+### Q10: 任务管理器为什么每个服务有两个 Python？
+uv 管理的虚拟环境启动器会再启动实际 Python 解释器，因此 uvicorn 和 Celery 通常各显示一组 `Python (2)`。这是正常现象。需要停止服务时按完整命令行识别 `server.main:app` 和 `celery -A server.tasks`，不要直接结束同机所有 `python.exe`。
+
 ---
 
 ## 升级日志（HEAD `f606bba`，2026-06-23）

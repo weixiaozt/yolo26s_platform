@@ -143,6 +143,17 @@ PUT  /api/projects/{id}/images/batch-class    cls 批量打分类标签
 
 ---
 
+## 训练内存 / Workers / 跨版本部署坑（2026-07-21）
+
+1. **不要再强制 `cache="ram"`**：4050 张 640×640 三通道切片解码后约占 4.6 GiB。RTX 3060 6GB + 16GB RAM 机器曾在 CUDA OOM 自动重建 DataLoader 时耗尽系统内存，最后只显示 OpenCV `Failed to allocate 1228800 bytes`。`core/train.py` 现固定 `cache=False`；只影响读盘速度，不影响精度。
+2. **看完整 traceback 的第一处 OOM**：最终的 OpenCV `Insufficient memory` 可能只是二次异常，真正原因常是前面的 `torch.OutOfMemoryError: CUDA out of memory`。资源类失败由 `server/tasks/train_task.py` 转成中文参数建议，同时保留技术堆栈。
+3. **Workers 是给高配机提速的，不要全局禁用**：2026-07-04 提交 `0f25d3f` 把固定 `workers=0` 改成可配置；4070 Ti 机器建议先试 4，Windows 异常时回到 0。RTX 3060 6GB / 16GB RAM 建议 0～2。实测 `batch=16, workers=2` 可跑；`batch=64, workers=6` 会爆 6GB 显存并放大内存峰值。
+4. **Celery 是常驻进程**：训练成功、失败、取消后都必须 `gc.collect()` + `torch.cuda.empty_cache()` + `torch.cuda.ipc_collect()`；已在任务 `finally` 统一执行。改了 `core/*` 或 `server/tasks/*` 后必须重启 Celery，运行中的旧 worker 不会热加载。
+5. **`unexpected keyword argument 'workers'` 是混版，不是模型缺失**：说明新版 `server/tasks/train_task.py` 配了旧版 `core/train.py`，或 Celery 仍缓存旧模块。完整同步 `server/` + `core/`，确认 `inspect.signature(core.train.run_train)` 含 `workers`，再重启 uvicorn/Celery。复制 `.pt` 不能解决参数签名错误。
+6. **任务管理器里的 Python 成对出现属正常**：uv 管理的 venv 启动器会再拉起实际 Python；通常一组是 uvicorn，一组是 Celery。用进程命令行区分，不要按名称误杀同机其它 Python 项目。
+
+---
+
 ## 工作约定
 
 1. **不要每次自动 `git push`**。只在用户明确说"提交/合并/push"时推。
