@@ -154,6 +154,35 @@ PUT  /api/projects/{id}/images/batch-class    cls 批量打分类标签
 
 ---
 
+## 离线编译包 Celery 文件队列待修复（2026-07-28）
+
+现象：`D:\vp-vision` pyc-only 离线包中，新训练任务永久停在 `pending/排队中`；API 的任务/epoch 轮询持续返回 200，但 Celery worker 没有收到任务。
+
+已确认根因与待合并修复点：
+
+1. 离线包在 `config/.env` 使用 `CELERY_BROKER_URL=filesystem://`；Kombu 5.6.x 的 Windows filesystem transport 会导入 `pywintypes`、`win32con`、`win32file`，而打包源 venv 未安装/携带 `pywin32`，实际报 `ModuleNotFoundError: No module named 'pywintypes'`。
+2. `server/routers/train.py::create_train_task` 先 `db.commit()` 写入 `pending`，再调用 `run_training_pipeline.delay()`；broker 投递异常没有回写 `failed`，因此留下永远排队的僵尸任务。
+3. `tools/build_vpvision_offline_pack.py` 生成的 `smoke_test.bat` 只导入 `server.main`/`core.train`，没有连接 filesystem broker，也没有做真实的任务发布/消费测试，所以构建阶段漏检。
+4. 后续合并时应同时：为 Windows 离线 venv 加入并打包 `pywin32`；投递失败时 rollback/标记任务 `failed` 并返回中文“训练队列不可用”；构建前检查 win32 模块；离线包验收增加一次 filesystem broker 端到端投递/消费测试。
+5. 修复后的旧 `pending` 任务不会自动恢复，因为消息从未成功写入 broker；需删除/取消旧记录后重新创建训练任务。
+
+在上述修复合并并重打包前，当前 `vp-vision` 离线编译包不可视为训练队列可用。
+
+---
+
+## 项目38 两级级联部署记录（2026-07-29）
+
+目标：在不牺牲一级高召回的前提下，用二级分类过滤倒角等一级假阳性。
+
+1. 一级使用任务 68 的 `yolo11n-seg`，类别为 `隐裂 / 崩边 / 缺口`；二级使用任务 73 的 `yolo11n-cls`，类别索引必须固定为 `0=隐裂, 1=崩边, 2=缺口, 3=OK`。
+2. 已验证的生产参数：一级 `resize=2048`、`tile=640`、`overlap=0.2`、`padding=32`、`conf=0.01`、NMS IoU=`0.5`、形态学三通道启用且膨胀/腐蚀核均为 `3`；二级只有在 `P(OK) >= 0.70` 时才否决一级候选，其他情况一律保留 NG。单图候选上限不能设为 20（测试中出现过 27 个候选），建议至少 50。
+3. OpenVINO FP16 在 55 张人工复核生产图上的图级结果：OK 误报 `0/34`、NG 检出 `21/21`；381 个一级候选经二级后保留 204 个。该指标是图级验证，不等同于逐实例数量验收。
+4. 同批数据上 FP16 与 FP32 的一级框、类别及二级 Top-1 完全一致；FP16 稳态总耗时 `0.788s/图`，FP32 为 `0.895s/图`，FP16 快约 11.9%。开发机是 i5-12450H，生产 i7-12700 必须另做实机 CT 验收。
+5. 生产端若直接读取 `metadata.yaml` 文本，二级中文类别必须写成裸 UTF-8 字符：`0: 隐裂`、`1: 崩边`、`2: 缺口`、`3: OK`。不能使用 `\uXXXX` 转义，也不能加双引号；部分生产解析器会把它们当作类别名的一部分。只改 metadata 不改 `best.xml` / `best.bin`，无需重训。
+6. 可复现工具：`tools/eval_cascade_openvino.py`（55 图级联测试）、`tools/export_cascade_review_crops.py`（导出二级实际小图）、`tools/run_single_cascade.py`（单图验证）。模型和部署 zip 均为存储产物，不提交 Git。
+
+---
+
 ## 工作约定
 
 1. **不要每次自动 `git push`**。只在用户明确说"提交/合并/push"时推。

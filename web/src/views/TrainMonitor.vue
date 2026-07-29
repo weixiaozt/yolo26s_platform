@@ -28,9 +28,12 @@
             <span style="font-size:11px;color:#999">{{ row.current_epoch }}/{{ row.epochs }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="最佳 mAP50" width="120">
+        <el-table-column label="最佳指标" width="150">
           <template #default="{row}">
-            <span v-if="row.best_map50" style="font-weight:600;color:#67C23A">{{ (row.best_map50*100).toFixed(1) }}%</span>
+            <span v-if="row.best_map50" style="font-weight:600;color:#67C23A">
+              {{ row.config?.task_type === 'cls' ? 'Top-1' : 'mAP50' }}
+              {{ (row.best_map50*100).toFixed(1) }}%
+            </span>
             <span v-else style="color:#999">-</span>
           </template>
         </el-table-column>

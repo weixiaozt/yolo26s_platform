@@ -275,6 +275,21 @@ D:\vp-vision\tools\smoke_test.bat
 
 ## 常见问题
 
+### 已知待修复：训练任务一直显示“排队中”
+
+2026-07-28 确认当前 filesystem broker 版离线包存在以下缺陷，需与后续源码改动一起合并后重新打包：
+
+- Windows 下 Kombu 的 `filesystem://` transport 依赖 `pywintypes`、`win32con`、`win32file`，当前离线 venv 未携带 `pywin32`。
+- API 先保存 `pending` 任务再投递 Celery；投递失败后没有把任务改成 `failed`，页面因此持续显示排队中。
+- 当前 `smoke_test.bat` 没有测试 broker 连接和任务投递，无法在交付前发现该问题。
+
+修复验收要求：
+
+1. 离线 venv 中能正常 `import pywintypes, win32con, win32file`。
+2. API 与 worker 使用同一个 `D:\vp-vision\storage\celery-broker`，完成一次真实任务投递和消费。
+3. broker 不可用时，创建接口给出中文“训练队列不可用”，数据库任务进入 `failed` 而非永久 `pending`。
+4. 修复前产生的排队任务需要删除/取消并重新创建，不会自动恢复。
+
 ### 后端启动报 license file not found
 
 还没有把 `license.dat` 放到：
