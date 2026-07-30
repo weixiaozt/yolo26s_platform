@@ -280,7 +280,10 @@ def run_train(
             print(f"[task_type=det] 自动切换检测模型: {model_name}")
     elif is_cls:
         # 分类必须用 -cls 后缀模型
-        if "-cls" not in model_name.lower():
+        # 继承训练传入的是实际 best.pt/last.pt 路径，不能把 last.pt 改写成
+        # last-cls.pt；仅对不存在的基础模型名执行自动补全。
+        is_weight_path = Path(model_name).is_file()
+        if "-cls" not in model_name.lower() and not is_weight_path:
             # 用户传 yolo11s.pt → yolo11s-cls.pt
             base = model_name.lower().replace("-seg", "").replace(".pt", "")
             model_name = f"{base}-cls.pt"

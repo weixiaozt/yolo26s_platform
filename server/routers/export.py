@@ -10,13 +10,16 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..database import get_db, SessionLocal
 from ..config import settings
-from ..models.train_task import TrainTask
+from ..models.train_task import TrainTask, TrainEpochLog
 from ..models.exported_model import ExportedModel
 from ..models.project import Project
+from ..models.defect_class import DefectClass
+from ..services.dataset_service import resolve_classification_display_names
 
 _root = str(Path(__file__).parent.parent.parent)
 if _root not in sys.path:
@@ -108,12 +111,24 @@ def list_exportable_tasks(project_id: int = 0, db: Session = Depends(get_db)):
             if not cfg_imgsz:
                 cfg_imgsz = 640
 
+        # 分类没有 mAP50；导出选择器显示的是 Top-1 Accuracy。历史任务的
+        # best_map50 可能仍为 0，因此直接从每轮日志取真实最高值。
+        best_metric = t.best_map50
+        if proj_task_type == "cls":
+            best_top1 = (
+                db.query(func.max(TrainEpochLog.top1_acc))
+                .filter(TrainEpochLog.task_id == t.id)
+                .scalar()
+            )
+            if best_top1 is not None:
+                best_metric = float(best_top1)
+
         result.append({
             "task_id": t.id,
             "task_name": t.task_name,
             "task_type": proj_task_type,
             "status": t.status,
-            "best_map50": t.best_map50,
+            "best_map50": best_metric,
             "current_epoch": t.current_epoch,
             "epochs": t.epochs,
             "imgsz": cfg_imgsz,
@@ -140,6 +155,23 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
     proj = db.query(Project).filter(Project.id == task.project_id).first()
     if proj and proj.task_type == "cls" and req.imgsz != 224:
         req.imgsz = 224
+
+    # 即便历史权重内部仍记录 Crack/EdgeChip/Notch，导出包也始终使用
+    # 项目标准中文显示名。模型 index 顺序由该任务的 class_names 决定。
+    display_class_names = None
+    if proj and proj.task_type == "cls":
+        classes = (
+            db.query(DefectClass)
+            .filter(DefectClass.project_id == proj.id)
+            .order_by(DefectClass.class_index)
+            .all()
+        )
+        try:
+            source_names = (task.config or {}).get("class_names")
+            ordered = resolve_classification_display_names(classes, source_names)
+            display_class_names = [dc.name for dc in ordered]
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"分类类别映射校验失败：{exc}")
 
     # half 字段是 3 态精度码：0=FP32 / 1=FP16 / 2=INT8
     precision_code = 2 if req.int8 else (1 if req.half else 0)
@@ -187,7 +219,7 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
             dataset_path = str(Path(task.output_dir) / "dataset")
     threading.Thread(
         target=_do_export,
-        args=(export_id, src_path, req.export_format, req.imgsz, req.half, req.int8, req.nms, req.head_mode, dataset_path),
+        args=(export_id, src_path, req.export_format, req.imgsz, req.half, req.int8, req.nms, req.head_mode, dataset_path, display_class_names),
         daemon=True,
     ).start()
 
@@ -204,6 +236,7 @@ def _do_export(
     nms: bool = False,
     head_mode: str = "legacy",
     dataset_path: str = None,
+    display_class_names: list[str] | None = None,
 ):
     """后台执行导出"""
     db = SessionLocal()
@@ -224,6 +257,7 @@ def _do_export(
             nms=nms,
             head_mode=head_mode,
             dataset_path=dataset_path,
+            display_class_names=display_class_names,
         )
 
         if result.get("error"):

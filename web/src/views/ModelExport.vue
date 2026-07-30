@@ -23,7 +23,9 @@
                 <span>#{{ t.task_id }} {{ t.task_name }}</span>
                 <span style="font-size:12px;color:#909399;display:flex;gap:8px;align-items:center">
                   <el-tag size="small" :type="taskStatusType(t.status)">{{ statusText(t.status) }}</el-tag>
-                  <span v-if="t.best_map50 != null">mAP50={{ (t.best_map50 * 100).toFixed(1) }}%</span>
+                  <span v-if="t.best_map50 != null">
+                    {{ t.task_type === 'cls' ? 'Top-1' : 'mAP50' }}={{ (t.best_map50 * 100).toFixed(1) }}%
+                  </span>
                   <span v-else-if="t.current_epoch">{{ t.current_epoch }}/{{ t.epochs }}ep</span>
                 </span>
               </div>

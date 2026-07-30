@@ -71,6 +71,7 @@ def run_export(
     simplify: bool = True,
     device: str = None,
     dataset_path: str = None,
+    display_class_names: list[str] | None = None,
     progress_callback: Optional[Callable] = None
 ) -> dict:
     """
@@ -241,6 +242,9 @@ def run_export(
 
             ov_path = model2.export(**export_kwargs)
             results["export_path"] = str(ov_path)
+            if display_class_names:
+                from server.services.classification_metadata import write_openvino_metadata_names
+                write_openvino_metadata_names(str(ov_path), display_class_names)
             
         except Exception as e:
             results["export_path"] = None

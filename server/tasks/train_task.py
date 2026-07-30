@@ -135,6 +135,29 @@ def run_training_pipeline(self, task_id: int):
         task_type = (project.task_type if project else "seg") or "seg"
         config["task_type"] = task_type
 
+        # 分类继承训练时，父模型的 output index 才是标签真相。先读取其类别
+        # 名称，数据集构建阶段会按语义把当前项目的中文类别排到同一顺序。
+        resume_class_names = None
+        if task_type == "cls" and config.get("train_mode") == "finetune":
+            resume_task_id = config.get("resume_from_task_id")
+            resume_model_type = config.get("resume_model_type", "best")
+            if resume_task_id:
+                previous_task = db.query(TrainTask).filter(TrainTask.id == resume_task_id).first()
+                if previous_task:
+                    previous_path = (
+                        previous_task.best_model_path
+                        if resume_model_type == "best"
+                        else previous_task.last_model_path
+                    )
+                    previous_names = (previous_task.config or {}).get("class_names")
+                    if previous_path and Path(previous_path).exists() and isinstance(previous_names, list):
+                        resume_class_names = previous_names
+                    elif previous_path and Path(previous_path).exists():
+                        raise ValueError(
+                            f"继承分类任务 {resume_task_id} 缺少类别映射记录，"
+                            "为避免标签错位，已拒绝开始训练。"
+                        )
+
         # 更新状态
         task.status = "preparing"
         task.started_at = datetime.now()
@@ -156,6 +179,7 @@ def run_training_pipeline(self, task_id: int):
                 task_output_dir=str(task_dir),
                 db=db,
                 train_ratio=config.get("train_ratio", 0.8),
+                model_class_names=resume_class_names,
             )
         elif task_type == "det":
             dataset_result = prepare_detection_dataset(
@@ -194,6 +218,9 @@ def run_training_pipeline(self, task_id: int):
 
         # 保存类别信息到 config（供后续继承训练时校验）
         config["class_names"] = class_names
+        if task_type == "cls":
+            config["classification_class_mapping"] = dataset_result.get("class_mapping", [])
+            config["classification_dataset_folders"] = dataset_result.get("class_folder_names", [])
         task.config = config
         db.commit()
 
@@ -316,6 +343,14 @@ def run_training_pipeline(self, task_id: int):
                 if task_obj:
                     task_obj.current_epoch = ep + 1
 
+                    # 分类验收使用 Top-1 Accuracy；数据库历史字段 best_map50 在
+                    # cls 任务中兼容承载这个最佳值，前端会按 task_type 显示 Top-1。
+                    if task_type == "cls" and data.get("top1_acc") is not None:
+                        task_obj.best_map50 = max(
+                            task_obj.best_map50 or 0.0,
+                            float(data["top1_acc"]),
+                        )
+
                     # trainer.best_fitness 由 core/train.py 透传过来，
                     # 是 Ultralytics 内部维护的"包括当前 epoch 的"历史最佳。
                     # 当它增加时，说明当前 epoch 是新最佳，对应的就是 best.pt 的权重。
@@ -323,9 +358,10 @@ def run_training_pipeline(self, task_id: int):
                     prev_best_fit = task_obj.best_fitness or 0
                     if new_best_fit > prev_best_fit:
                         task_obj.best_fitness = new_best_fit
-                        # 同步更新 best_map50（与 best.pt 对应的 epoch 一致）
-                        cur_map50 = data.get("mAP50_B", 0) or 0
-                        task_obj.best_map50 = cur_map50
+                        if task_type != "cls":
+                            # 同步更新 best_map50（与 best.pt 对应的 epoch 一致）
+                            cur_map50 = data.get("mAP50_B", 0) or 0
+                            task_obj.best_map50 = cur_map50
 
                 db.commit()
             except Exception as e:
@@ -368,6 +404,15 @@ def run_training_pipeline(self, task_id: int):
             epoch_callback=epoch_callback,
             cancel_check=cancel_check,
         )
+
+        # ImageFolder 使用的 0000/0001 目录仅用于锁定标签 index。权重落盘后
+        # 立即写回中文显示名，确保后续继承、在线推理和 OpenVINO 导出一致。
+        if task_type == "cls":
+            from ..services.classification_metadata import write_classification_checkpoint_names
+            write_classification_checkpoint_names(
+                [train_result.get("best_pt"), train_result.get("last_pt")],
+                class_names,
+            )
 
         # ---- 训练完成或被取消 ----
         # 重新查一次任务状态：

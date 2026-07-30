@@ -730,12 +730,75 @@ def prepare_obb_dataset(
     }
 
 
+_CLS_SEMANTIC_ALIASES = {
+    # 二级分类的中英文历史名称。key 是内部语义键，防止显示名或 ImageFolder
+    # 的字典序变化后，继承训练时标签错位。
+    "crack": "crack",
+    "隐裂": "crack",
+    "edgechip": "edge_chip",
+    "edge chip": "edge_chip",
+    "崩边": "edge_chip",
+    "notch": "notch",
+    "缺口": "notch",
+    "ok": "ok",
+    "正常": "ok",
+}
+
+
+def _classification_semantic_key(name: str) -> str:
+    """将类别名归一为稳定的语义键；未知类别使用规范化原名。"""
+    normalized = " ".join(str(name or "").strip().lower().split())
+    return _CLS_SEMANTIC_ALIASES.get(normalized, normalized)
+
+
+def resolve_classification_display_names(classes, model_class_names: Optional[list[str]] = None) -> list:
+    """返回与模型输出 index 对齐的项目类别对象列表。
+
+    从头训练以项目 class_index 定义模型输出顺序；继承训练以父模型的输出
+    顺序为准，再按类别语义映射回当前项目的中文显示名。
+    """
+    ordered = sorted(classes, key=lambda dc: dc.class_index)
+    if not model_class_names:
+        return ordered
+
+    by_semantic = {}
+    for defect_class in ordered:
+        key = _classification_semantic_key(defect_class.name)
+        if not key:
+            raise ValueError(f"分类类别存在空名称（C{defect_class.class_index}）")
+        if key in by_semantic:
+            raise ValueError(
+                f"当前项目存在语义重复的分类类别：{by_semantic[key].name} / {defect_class.name}"
+            )
+        by_semantic[key] = defect_class
+
+    resolved = []
+    used_ids = set()
+    for model_name in model_class_names:
+        defect_class = by_semantic.get(_classification_semantic_key(model_name))
+        if defect_class is None:
+            raise ValueError(
+                f"无法将继承模型类别“{model_name}”映射到当前项目类别；"
+                "请确认类别语义一致，或选择从头训练。"
+            )
+        if defect_class.id in used_ids:
+            raise ValueError(f"继承模型类别“{model_name}”映射重复，无法安全继承训练")
+        used_ids.add(defect_class.id)
+        resolved.append(defect_class)
+
+    if len(resolved) != len(ordered):
+        missing = [dc.name for dc in ordered if dc.id not in used_ids]
+        raise ValueError(f"继承模型类别数与当前项目不一致，未匹配：{', '.join(missing)}")
+    return resolved
+
+
 def prepare_classification_dataset(
     project_id: int,
     task_output_dir: str,
     db: Session,
     train_ratio: float = 0.8,
     seed: int = 42,
+    model_class_names: Optional[list[str]] = None,
     progress_callback=None,
 ) -> dict:
     """
@@ -767,8 +830,10 @@ def prepare_classification_dataset(
     )
     if not classes:
         raise ValueError("项目无类别定义")
-    cls_id_to_name = {dc.id: dc.name for dc in classes}
-    class_names = [dc.name for dc in classes]
+    output_classes = resolve_classification_display_names(classes, model_class_names)
+    cls_id_to_output_index = {dc.id: index for index, dc in enumerate(output_classes)}
+    class_names = [dc.name for dc in output_classes]
+    folder_names = [f"{index:04d}" for index in range(len(output_classes))]
 
     # 已标注（有 class_id）的图片
     images = (
@@ -790,8 +855,8 @@ def prepare_classification_dataset(
     task_dir = Path(task_output_dir)
     dataset_dir = task_dir / "dataset"
     for split in ("train", "val"):
-        for name in class_names:
-            (dataset_dir / split / name).mkdir(parents=True, exist_ok=True)
+        for folder_name in folder_names:
+            (dataset_dir / split / folder_name).mkdir(parents=True, exist_ok=True)
 
     random.seed(seed)
     train_count = 0
@@ -799,16 +864,23 @@ def prepare_classification_dataset(
     per_class_stats = {}
 
     for cls_id, imgs in by_class.items():
-        cls_name = cls_id_to_name.get(cls_id)
-        if not cls_name:
+        output_index = cls_id_to_output_index.get(cls_id)
+        if output_index is None:
             continue
+        cls_name = class_names[output_index]
         random.shuffle(imgs)
-        split_idx = max(1, int(len(imgs) * train_ratio))
-        train_imgs = imgs[:split_idx]
-        val_imgs = imgs[split_idx:]
-        # 至少 1 张验证集
-        if not val_imgs and len(train_imgs) > 1:
-            val_imgs = [train_imgs.pop()]
+        if train_ratio >= 1.0:
+            # 闭集复核模式：用户明确选择用同一批已人工确认的小图做训练和
+            # 验证，验收值即该固定样本集的一致率。硬链接不会复制原始图片。
+            train_imgs = list(imgs)
+            val_imgs = list(imgs)
+        else:
+            split_idx = max(1, int(len(imgs) * train_ratio))
+            train_imgs = imgs[:split_idx]
+            val_imgs = imgs[split_idx:]
+            # 至少 1 张验证集
+            if not val_imgs and len(train_imgs) > 1:
+                val_imgs = [train_imgs.pop()]
         per_class_stats[cls_name] = {"train": len(train_imgs), "val": len(val_imgs)}
 
         for split, img_list in (("train", train_imgs), ("val", val_imgs)):
@@ -824,7 +896,7 @@ def prepare_classification_dataset(
                 ext = fp.suffix.lower() or '.png'
                 if ext not in {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}:
                     ext = '.png'
-                dst = dataset_dir / split / cls_name / f"{img.id:08d}{ext}"
+                dst = dataset_dir / split / folder_names[output_index] / f"{img.id:08d}{ext}"
                 _link_or_copy(str(fp), str(dst))
                 if split == "train":
                     train_count += 1
@@ -837,6 +909,16 @@ def prepare_classification_dataset(
     return {
         "dataset_dir": str(dataset_dir),
         "class_names": class_names,
+        "class_folder_names": folder_names,
+        "class_mapping": [
+            {
+                "model_index": index,
+                "project_class_index": dc.class_index,
+                "project_class_id": dc.id,
+                "display_name": dc.name,
+            }
+            for index, dc in enumerate(output_classes)
+        ],
         "split_stats": {
             "train": train_count,
             "val": val_count,

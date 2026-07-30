@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -63,6 +64,8 @@ def create_train_task(
 @router.get("/projects/{project_id}/train/tasks")
 def list_train_tasks(project_id: int, db: Session = Depends(get_db)):
     """获取项目的训练任务列表"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    is_cls_project = bool(project and project.task_type == "cls")
     tasks = (
         db.query(TrainTask)
         .filter(TrainTask.project_id == project_id)
@@ -74,6 +77,16 @@ def list_train_tasks(project_id: int, db: Session = Depends(get_db)):
     result = []
     for t in tasks:
         d = TrainTaskOut.model_validate(t).model_dump()
+        # 分类任务的最佳指标是 epoch 日志里的 Top-1，不是 train_tasks.best_map50。
+        # 兼容旧表结构：继续复用 best_map50 输出字段，但在 API 中动态填入真实值。
+        if is_cls_project:
+            best_top1 = (
+                db.query(func.max(TrainEpochLog.top1_acc))
+                .filter(TrainEpochLog.task_id == t.id)
+                .scalar()
+            )
+            if best_top1 is not None:
+                d["best_map50"] = float(best_top1)
         # 从 config 中提取类别数
         if t.config and "class_names" in t.config:
             d["num_classes"] = len(t.config["class_names"])

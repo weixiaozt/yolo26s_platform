@@ -59,7 +59,7 @@ cls 标签存 `images.class_id`（图级），其他 task 标签存 `annotations
 
 1. **imgsz 必须 224**：YOLO11-cls 在 ImageNet 224 预训练。`core/train.py` 已经强制 `if imgsz != 224: imgsz = 224`，并把 degrees/flipud/mosaic/copy_paste/mixup 全置 0。项目级 crop_size 对 cls 无意义。
 
-2. **类别名映射用 model.names，不要用 DB class_index**：cls 训练用 ImageFolder 模式，类别 index 是子目录名字典序（如 Broken=0, Crack=1, OK=2），与 DB 创建顺序不一致。`_resolve_class_names` 优先 model.names，DB 仅兜底。
+2. **分类标签顺序与显示名彻底分离**：`prepare_classification_dataset` 使用 `0000/0001/...` 固定 ImageFolder label，训练后由 `classification_metadata.py` 把权重 `model.names` 写回项目显示名。继承训练会根据父模型类别语义（兼容 Crack/EdgeChip/Notch/OK）映射当前中文类别；不要再依赖 DB class_index 或目录字典序。OpenVINO 导出会把 `metadata.yaml` 写为 UTF-8 原始中文名。
 
 3. **EasyLabel BMP 多是 128×128 单通道灰度**：cv2.imread 默认会扩成三通道，但训练/推理预处理要保持一致。
 

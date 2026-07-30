@@ -15,7 +15,9 @@ class TrainConfig(BaseModel):
     model_name: str = Field(default="yolo26s-seg", description="模型尺寸: yolo26n/s/m/l/x-seg")
 
     # 数据划分
-    train_ratio: float = Field(default=0.8, ge=0.5, le=0.95)
+    # cls 闭集复核训练允许 1.0：同一批人工复核小图同时作为训练/验证集，
+    # 用于验收与人工标签的一致率；其它任务仍沿用常规划分逻辑。
+    train_ratio: float = Field(default=0.8, ge=0.5, le=1.0)
     oversample_factor: int = Field(default=5, ge=1, le=20)
 
     # 基本训练
