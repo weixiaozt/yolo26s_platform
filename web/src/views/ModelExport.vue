@@ -65,8 +65,8 @@
           <span style="font-size:12px;color:#909399;margin-left:8px">与训练时一致（通常 640）</span>
         </el-form-item>
         <el-form-item v-else label="输入尺寸">
-          <el-tag size="small" type="info">224 ×224（分类模型固定）</el-tag>
-          <span style="font-size:12px;color:#909399;margin-left:8px">YOLO11-cls 标准输入尺寸，无需调整</span>
+          <el-input-number v-model="imgsz" :min="64" :max="1280" :step="32" />
+          <span style="font-size:12px;color:#909399;margin-left:8px">必须与该训练任务的分类输入尺寸一致</span>
         </el-form-item>
         <el-form-item label="精度">
           <el-radio-group v-model="precision">

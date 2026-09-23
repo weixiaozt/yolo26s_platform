@@ -288,11 +288,14 @@ def run_train(
             base = model_name.lower().replace("-seg", "").replace(".pt", "")
             model_name = f"{base}-cls.pt"
             print(f"[task_type=cls] 自动切换分类模型: {model_name}")
-        # cls 防呆：项目级 crop_size 对 cls 无意义；YOLO11-cls.pt 是 ImageNet 224 预训练的，
-        # 工业小图放大到 640 会引入插值伪影 → 学不到纹理，模型塌缩到多数类。
-        if imgsz != 224:
-            print(f"[task_type=cls] imgsz {imgsz} → 224（YOLO11-cls 标准）")
-            imgsz = 224
+        # 分类尺寸由项目 crop_size 传入；YOLO11-cls 支持使用 32 的倍数作为 imgsz。
+        try:
+            imgsz = int(imgsz)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"分类输入尺寸必须是整数，收到: {imgsz!r}") from exc
+        if imgsz < 32 or imgsz % 32 != 0:
+            raise ValueError(f"分类输入尺寸必须是 >=32 且为 32 的倍数，收到: {imgsz}")
+        print(f"[task_type=cls] 使用项目分类输入尺寸: {imgsz}×{imgsz}")
         # 工业 cls 常依赖纹理方向，关掉旋转/上下翻转；mosaic/mixup/copy_paste cls 不读但显式置 0 防误用
         augment_degrees = 0.0
         augment_flipud = 0.0

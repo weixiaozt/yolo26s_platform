@@ -53,6 +53,7 @@ def run_dataset_split(
     train_ratio: float = 0.8,
     oversample_factor: int = 5,
     bg_keep_ratio: float = 0.10,
+    force_train_prefixes: Optional[list[str]] = None,
     random_seed: int = 42,
     progress_callback: Optional[Callable] = None
 ) -> dict:
@@ -124,11 +125,48 @@ def run_dataset_split(
     train_labeled = labeled_samples[:split_idx]
     val_labeled = labeled_samples[split_idx:]
 
+    # 小样本工业数据很容易把稀有类别全部随机进训练集，导致 best.pt 的
+    # 验证指标完全看不到该类别。只要该类至少有两个样本，就保证 train/val
+    # 两边都出现（多标签样本移动时保留其全部标签）。
+    for cls_id in all_class_counts:
+        if not any(cls_id in classes for _, classes in val_labeled):
+            candidates = [item for item in train_labeled if cls_id in item[1]]
+            if len(candidates) >= 2:
+                chosen = min(candidates, key=lambda item: (len(set(item[1])), item[0]))
+                train_labeled.remove(chosen)
+                val_labeled.append(chosen)
+        if not any(cls_id in classes for _, classes in train_labeled):
+            candidates = [item for item in val_labeled if cls_id in item[1]]
+            if len(candidates) >= 2:
+                chosen = min(candidates, key=lambda item: (len(set(item[1])), item[0]))
+                val_labeled.remove(chosen)
+                train_labeled.append(chosen)
+
     # ---- 处理背景样本 ----
-    random.shuffle(background_samples)
-    bg_keep_count = max(1, int(len(background_samples) * bg_keep_ratio))
-    train_bg = background_samples[:bg_keep_count]
-    # 背景样本不进入验证集
+    # 用户明确审核为 OK 的原图滑窗全部进入训练集；其余背景滑窗按比例抽样，
+    # 再划分 train/val，让验证指标能够反映假阳性。
+    prefixes = tuple(force_train_prefixes or [])
+    if prefixes:
+        forced_bg = [
+            stem for stem in background_samples
+            if any(stem == prefix or stem.startswith(f"{prefix}_") for prefix in prefixes)
+        ]
+        forced_bg_set = set(forced_bg)
+        regular_bg = [stem for stem in background_samples if stem not in forced_bg_set]
+    else:
+        forced_bg = []
+        regular_bg = list(background_samples)
+    random.shuffle(regular_bg)
+    bg_keep_count = int(len(regular_bg) * bg_keep_ratio)
+    if bg_keep_ratio > 0 and regular_bg and bg_keep_count == 0:
+        bg_keep_count = 1
+    kept_bg = regular_bg[:bg_keep_count]
+    if len(kept_bg) >= 2 and train_ratio < 1.0:
+        bg_split_idx = min(len(kept_bg) - 1, max(1, int(len(kept_bg) * train_ratio)))
+    else:
+        bg_split_idx = len(kept_bg)
+    train_bg = forced_bg + kept_bg[:bg_split_idx]
+    val_bg = kept_bg[bg_split_idx:]
 
     # ---- 构建最终的训练集和验证集列表 ----
     train_stems = []
@@ -149,6 +187,8 @@ def run_dataset_split(
     # 添加背景训练样本
     for stem in train_bg:
         train_stems.append(stem)
+    for stem in val_bg:
+        val_stems.append(stem)
 
     # ---- 复制文件 ----
     total_ops = len(train_stems) + len(val_stems)
@@ -192,6 +232,7 @@ def run_dataset_split(
         "total_background": len(background_samples),
         "train_labeled": len(train_labeled),
         "train_bg": len(train_bg),
+        "val_bg": len(val_bg),
         "train_oversampled": len(train_stems) - len(train_labeled) - len(train_bg),
         "train_total": len(train_stems),
         "val_total": len(val_stems),

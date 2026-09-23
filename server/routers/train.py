@@ -77,6 +77,10 @@ def list_train_tasks(project_id: int, db: Session = Depends(get_db)):
     result = []
     for t in tasks:
         d = TrainTaskOut.model_validate(t).model_dump()
+        # 任务配置历史上没有持久化 task_type，前端无法仅凭 best_map50
+        # 判断分类任务，导致分类项目仍显示“mAP50”。返回时以所属项目为准
+        # 补齐展示字段；不改变数据库中的历史配置。
+        d["config"] = {**(d.get("config") or {}), "task_type": project.task_type}
         # 分类任务的最佳指标是 epoch 日志里的 Top-1，不是 train_tasks.best_map50。
         # 兼容旧表结构：继续复用 best_map50 输出字段，但在 API 中动态填入真实值。
         if is_cls_project:

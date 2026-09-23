@@ -131,7 +131,7 @@ class BackgroundTrainer:
             train_result = run_train(
                 dataset_yaml=dataset_yaml,
                 output_dir=str(task_dir / "runs"),
-                imgsz=config.get("crop_size", 640),
+                imgsz=config.get("imgsz") or config.get("crop_size", 640),
                 epochs=config.get("epochs", 200),
                 batch_size=config.get("batch_size", 8),
                 patience=config.get("patience", 50),

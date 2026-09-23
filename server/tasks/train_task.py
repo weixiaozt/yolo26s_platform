@@ -187,6 +187,9 @@ def run_training_pipeline(self, task_id: int):
                 task_output_dir=str(task_dir),
                 db=db,
                 train_ratio=config.get("train_ratio", 0.85),
+                tile_size=config.get("crop_size") if config.get("det_tile") else None,
+                overlap=config.get("overlap", 0.25),
+                bg_keep_ratio=config.get("bg_keep_ratio", 0.25),
             )
         elif task_type == "obb":
             dataset_result = prepare_obb_dataset(
@@ -206,8 +209,9 @@ def run_training_pipeline(self, task_id: int):
                 overlap=config.get("overlap", 0.2),
                 train_ratio=config.get("train_ratio", 0.8),
                 oversample_factor=config.get("oversample_factor", 5),
-                bg_keep_ratio=0,
+                bg_keep_ratio=config.get("bg_keep_ratio", 0.15),
                 use_morphology=config.get("use_morphology", True),
+                preserve_aspect=config.get("preserve_aspect", False),
                 dilate_kernel=config.get("dilate_kernel", 3),
                 erode_kernel=config.get("erode_kernel", 3),
                 mask_dilate_kernel=config.get("mask_dilate_kernel", 0),
@@ -370,11 +374,12 @@ def run_training_pipeline(self, task_id: int):
 
         # 调用现有 core/train.py
         from core.train import run_train
+        default_imgsz = 224 if task_type == "cls" else 640
         train_result = run_train(
             dataset_yaml=dataset_yaml,
             output_dir=str(task_dir / "runs"),
             model_name=model_name,
-            imgsz=config.get("crop_size", 640),
+            imgsz=config.get("imgsz") or config.get("crop_size", default_imgsz),
             epochs=config.get("epochs", 150),
             batch_size=config.get("batch_size", 16),
             patience=config.get("patience", 0),
@@ -408,11 +413,22 @@ def run_training_pipeline(self, task_id: int):
         # ImageFolder 使用的 0000/0001 目录仅用于锁定标签 index。权重落盘后
         # 立即写回中文显示名，确保后续继承、在线推理和 OpenVINO 导出一致。
         if task_type == "cls":
-            from ..services.classification_metadata import write_classification_checkpoint_names
-            write_classification_checkpoint_names(
-                [train_result.get("best_pt"), train_result.get("last_pt")],
-                class_names,
-            )
+            # 该辅助模块属于分类显示元数据增强，不应成为训练成功的硬依赖。
+            # 旧部署在升级过程中可能还没有该文件；此时保留 Ultralytics 的
+            # 数字类别名，训练权重仍然有效，平台任务也必须正常收尾。
+            try:
+                from ..services.classification_metadata import (
+                    write_classification_checkpoint_names,
+                )
+            except ModuleNotFoundError as exc:
+                if exc.name != "server.services.classification_metadata":
+                    raise
+                print("[分类训练] 未找到 classification_metadata，跳过显示名写回")
+            else:
+                write_classification_checkpoint_names(
+                    [train_result.get("best_pt"), train_result.get("last_pt")],
+                    class_names,
+                )
 
         # ---- 训练完成或被取消 ----
         # 重新查一次任务状态：

@@ -293,7 +293,7 @@
         <el-form-item label="描述">
           <el-input v-model="editForm.description" type="textarea" :rows="2" />
         </el-form-item>
-        <!-- cls 项目隐藏 Resize/切割尺寸/重叠率（cls 训练统一走 imgsz=224，不切大图） -->
+        <!-- cls 项目不切大图，但需要配置分类模型输入尺寸 -->
         <template v-if="project?.task_type !== 'cls'">
           <el-row :gutter="16">
             <el-col :span="12">
@@ -320,10 +320,9 @@
             </el-col>
           </el-row>
         </template>
-        <el-form-item v-else>
-          <el-alert type="info" :closable="false" show-icon
-            title="分类项目无需 Resize/切割尺寸"
-            description="分类训练统一使用 ImageNet 标准 imgsz=224，原图直接 letterbox 到 224×224。这些字段对分类无效。" />
+        <el-form-item v-else label="分类输入尺寸">
+          <el-input-number v-model="editForm.crop_size" :min="64" :max="1280" :step="32" style="width:100%" />
+          <span class="hint">分类训练/导出统一使用此尺寸；当前项目设置为 224×224</span>
         </el-form-item>
       </el-form>
 

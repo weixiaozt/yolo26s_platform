@@ -189,6 +189,7 @@ def run_preprocess(
     dilate_kernel: int = 3,
     erode_kernel: int = 3,
     use_morphology: bool = True,
+    preserve_aspect: bool = False,
     mask_dilate_kernel: int = 0,
     progress_callback: Optional[Callable] = None
 ) -> dict:
@@ -204,6 +205,8 @@ def run_preprocess(
         dilate_kernel: 图像膨胀核大小（矩形，奇数，默认3）
         erode_kernel: 图像腐蚀核大小（矩形，奇数，默认3）
         use_morphology: 是否使用形态学三通道处理
+        preserve_aspect: 是否保持原图宽高比。启用后 target_h/target_w 是最大边界，
+            输出图像不补边，适用于后续滑窗切割。
         mask_dilate_kernel: 标注 Mask 膨胀核大小（矩形，奇数，0表示不膨胀，在Resize前进行）
         progress_callback: 进度回调函数 callback(current, total, message)
 
@@ -240,6 +243,7 @@ def run_preprocess(
         "without_mask": 0,
         "original_size": None,
         "target_size": (target_h, target_w),
+        "preserve_aspect": preserve_aspect,
     }
 
     # ---- 逐张处理 ----
@@ -254,8 +258,14 @@ def run_preprocess(
         if stats["original_size"] is None:
             stats["original_size"] = (img.shape[0], img.shape[1])
 
-        # 判断是否需要 Resize（如果原图已经是目标尺寸则跳过）
-        need_resize = (img.shape[0] != target_h) or (img.shape[1] != target_w)
+        # 保持宽高比时 target_h/target_w 表示最大边界，输出尺寸逐图计算。
+        if preserve_aspect:
+            scale = min(target_h / img.shape[0], target_w / img.shape[1])
+            resize_h = max(1, int(round(img.shape[0] * scale)))
+            resize_w = max(1, int(round(img.shape[1] * scale)))
+        else:
+            resize_h, resize_w = target_h, target_w
+        need_resize = (img.shape[0] != resize_h) or (img.shape[1] != resize_w)
         
         # 形态学处理：生成三通道图（在Resize前进行，保持原始图像细节）
         if use_morphology:
@@ -263,7 +273,7 @@ def run_preprocess(
 
         # Resize 图像（Bicubic）
         if need_resize:
-            img_resized = resize_image(img, (target_h, target_w))
+            img_resized = resize_image(img, (resize_h, resize_w))
         else:
             img_resized = img
 
@@ -283,7 +293,7 @@ def run_preprocess(
                 
                 # Resize Mask（最近邻）
                 if need_resize:
-                    mask_resized = resize_mask(mask, (target_h, target_w))
+                    mask_resized = resize_mask(mask, (resize_h, resize_w))
                 else:
                     mask_resized = mask
 

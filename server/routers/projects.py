@@ -456,7 +456,7 @@ def delete_defect_class(project_id: int, class_id: int, db: Session = Depends(ge
     ann_count = (
         db.query(func.count(Annotation.id))
         .join(Image, Annotation.image_id == Image.id)
-        .filter(Image.project_id == project_id, Annotation.class_index == dc.class_index)
+        .filter(Image.project_id == project_id, Annotation.class_id == dc.id)
         .scalar()
     )
     if ann_count and ann_count > 0:

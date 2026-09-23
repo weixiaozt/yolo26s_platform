@@ -57,7 +57,7 @@ cls 标签存 `images.class_id`（图级），其他 task 标签存 `annotations
 
 ## cls 任务的几个坑（已修复，留作 reminder）
 
-1. **imgsz 必须 224**：YOLO11-cls 在 ImageNet 224 预训练。`core/train.py` 已经强制 `if imgsz != 224: imgsz = 224`，并把 degrees/flipud/mosaic/copy_paste/mixup 全置 0。项目级 crop_size 对 cls 无意义。
+1. **imgsz 跟随项目 crop_size**：分类项目默认使用 224×224，也允许按项目要求配置为其他 32 倍数尺寸。`core/train.py` 会把 degrees/flipud/mosaic/copy_paste/mixup 等工业纹理不适合的增强置 0。训练和 OpenVINO 导出必须使用同一个 crop_size。
 
 2. **分类标签顺序与显示名彻底分离**：`prepare_classification_dataset` 使用 `0000/0001/...` 固定 ImageFolder label，训练后由 `classification_metadata.py` 把权重 `model.names` 写回项目显示名。继承训练会根据父模型类别语义（兼容 Crack/EdgeChip/Notch/OK）映射当前中文类别；不要再依赖 DB class_index 或目录字典序。OpenVINO 导出会把 `metadata.yaml` 写为 UTF-8 原始中文名。
 

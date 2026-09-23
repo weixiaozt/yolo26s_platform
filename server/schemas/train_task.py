@@ -18,7 +18,16 @@ class TrainConfig(BaseModel):
     # cls 闭集复核训练允许 1.0：同一批人工复核小图同时作为训练/验证集，
     # 用于验收与人工标签的一致率；其它任务仍沿用常规划分逻辑。
     train_ratio: float = Field(default=0.8, ge=0.5, le=1.0)
+    det_tile: bool = Field(default=False, description="目标检测使用原像素切片，并按原图固定划分训练验证")
     oversample_factor: int = Field(default=5, ge=1, le=20)
+    bg_keep_ratio: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="普通背景滑窗保留比例；显式审核为 OK 的原图始终全部保留",
+    )
+
+    imgsz: Optional[int] = Field(default=None, description="训练输入尺寸(imgsz)；为空则取工程crop_size")
 
     # 基本训练
     epochs: int = Field(default=200, ge=1, le=2000)
@@ -57,6 +66,10 @@ class TrainConfig(BaseModel):
 
     # 形态学预处理
     use_morphology: bool = True
+    preserve_aspect: bool = Field(
+        default=True,
+        description="保持原图宽高比缩放；resize_h/resize_w 作为最大边界",
+    )
     dilate_kernel: int = Field(default=3, ge=1, le=15)
     erode_kernel: int = Field(default=3, ge=1, le=15)
     mask_dilate_kernel: int = Field(default=0, ge=0, le=15)

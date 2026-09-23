@@ -103,9 +103,9 @@ def list_exportable_tasks(project_id: int = 0, db: Session = Depends(get_db)):
             continue
 
         cfg = t.config or {}
-        # cls 项目固定 224；其它项目优先用 config.imgsz，没有则 640
+        # 分类项目沿用训练时的 crop_size；其它项目优先用 config.imgsz，没有则 640
         if proj_task_type == "cls":
-            cfg_imgsz = 224
+            cfg_imgsz = cfg.get("crop_size", 224) if isinstance(cfg, dict) else 224
         else:
             cfg_imgsz = cfg.get("imgsz") if isinstance(cfg, dict) else None
             if not cfg_imgsz:
@@ -151,10 +151,11 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
     if not src_path or not Path(src_path).exists():
         raise HTTPException(status_code=404, detail="模型文件不存在")
 
-    # 分类模型固定 imgsz=224（YOLO11-cls 标准），与训练保持一致，避免导出形状错配
+    # 分类模型导出尺寸必须与训练时一致；优先读取任务快照中的 crop_size。
     proj = db.query(Project).filter(Project.id == task.project_id).first()
-    if proj and proj.task_type == "cls" and req.imgsz != 224:
-        req.imgsz = 224
+    if proj and proj.task_type == "cls":
+        train_config = task.config or {}
+        req.imgsz = int(train_config.get("crop_size", req.imgsz or 224))
 
     # 即便历史权重内部仍记录 Crack/EdgeChip/Notch，导出包也始终使用
     # 项目标准中文显示名。模型 index 顺序由该任务的 class_names 决定。

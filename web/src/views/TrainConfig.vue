@@ -46,7 +46,7 @@
               <el-form-item label="继承模型">
                 <el-select v-model="resumeTaskId" placeholder="选择历史训练任务" style="width:100%">
                   <el-option v-for="t in completedTasks" :key="t.id"
-                    :label="`${t.task_name} (mAP ${((t.best_map50||0)*100).toFixed(1)}%)${t.status==='cancelled' ? ' [取消@'+t.current_epoch+'/'+t.epochs+']' : ''}`"
+                    :label="`${t.task_name} (${taskType === 'cls' ? 'Top-1' : 'mAP50'} ${((t.best_map50||0)*100).toFixed(1)}%)${t.status==='cancelled' ? ' [取消@'+t.current_epoch+'/'+t.epochs+']' : ''}`"
                     :value="t.id" />
                 </el-select>
               </el-form-item>
@@ -173,12 +173,20 @@
           <!-- 数据划分 -->
           <el-card shadow="never" style="margin-bottom:20px">
             <template #header><span style="font-weight:600">数据划分</span></template>
+            <el-form-item v-if="taskType === 'seg'" label="保持原图宽高比">
+              <el-switch v-model="c.preserve_aspect" active-text="启用" inactive-text="关闭" />
+              <span class="hint">推荐启用；长边限制到项目 Resize，短边等比例变化，避免缺陷被拉伸</span>
+            </el-form-item>
             <el-form-item label="训练集比例">
               <el-slider v-model="c.train_ratio" :min="0.5" :max="0.95" :step="0.05" show-input />
             </el-form-item>
             <el-form-item label="稀有类过采样倍数">
               <el-input-number v-model="c.oversample_factor" :min="1" :max="20" />
               <span class="hint">小数据集建议 5~10</span>
+            </el-form-item>
+            <el-form-item v-if="taskType === 'seg'" label="背景滑窗保留比例">
+              <el-slider v-model="c.bg_keep_ratio" :min="0" :max="1" :step="0.05" show-input />
+              <span class="hint">用于抑制误判；审核为 OK 的整图始终全部保留</span>
             </el-form-item>
           </el-card>
         </el-col>
@@ -330,12 +338,12 @@ function getBaseDefaults() {
     epochs: 200, batch_size: 8, patience: 50, device: '0', workers: 4,
     lr0: 0.01, lrf: 0.01, momentum: 0.937, weight_decay: 0.0005,
     warmup_epochs: 3, warmup_momentum: 0.8,
-    train_ratio: 0.8, oversample_factor: 5,
+    train_ratio: 0.8, oversample_factor: 5, bg_keep_ratio: 0.15,
     hsv_h: 0.015, hsv_s: 0.7, hsv_v: 0.4,
     degrees: 180, translate: 0.1, scale: 0.5, shear: 0.0,
     flipud: 0.5, fliplr: 0.5,
     mosaic: 0.5, copy_paste: 0.5, mixup: 0.1, erasing: 0.1, close_mosaic: 30,
-    use_morphology: true, dilate_kernel: 3, erode_kernel: 3, mask_dilate_kernel: 0,
+    use_morphology: true, preserve_aspect: true, dilate_kernel: 3, erode_kernel: 3, mask_dilate_kernel: 0,
     crop_size: 640,
   } as Record<string, any>
 }
@@ -347,7 +355,7 @@ function defaultsForTaskType(tt: string): Record<string, any> {
     Object.assign(d, { model_name: 'yolo26s.pt', use_morphology: false, train_ratio: 0.85,
       copy_paste: 0, mixup: 0, degrees: 20, flipud: 0.5, mosaic: 0.3, epochs: 300, patience: 80 })
   } else if (tt === 'cls') {
-    // cls 走 ImageNet 标准 224；几何/混合增强大多关掉（工业纹理依赖方向）
+    // cls 使用项目设置的输入尺寸；几何/混合增强大多关掉（工业纹理依赖方向）
     Object.assign(d, { model_name: 'yolo11s-cls.pt', use_morphology: false, train_ratio: 0.8,
       crop_size: 224, degrees: 0, flipud: 0, fliplr: 0.5, translate: 0.05, scale: 0.2, shear: 0,
       mosaic: 0, copy_paste: 0, mixup: 0, erasing: 0, epochs: 100, patience: 30 })

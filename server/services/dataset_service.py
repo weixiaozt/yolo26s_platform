@@ -457,6 +457,9 @@ def prepare_detection_dataset(
     train_ratio: float = 0.85,
     seed: int = 42,
     progress_callback=None,
+    tile_size: int | None = None,
+    overlap: float = 0.25,
+    bg_keep_ratio: float = 0.25,
 ) -> dict:
     """
     目标检测数据集准备流程（不滑窗）：
@@ -475,6 +478,20 @@ def prepare_detection_dataset(
     raw_dir = str(task_dir / "raw")
     export_stats = build_detection_dataset_from_db(project_id, raw_dir, db)
     class_names = export_stats["class_names"]
+    if tile_size is not None:
+        import json
+        from .detection_tiles import tile_detection_dataset
+        frozen_path = settings.upload_path / str(project_id) / "det_split.json"
+        frozen = json.loads(frozen_path.read_text(encoding="utf-8")) if frozen_path.exists() else None
+        dataset_dir = task_dir / "dataset"
+        tiled = tile_detection_dataset(
+            raw_dir, dataset_dir, tile_size=tile_size, overlap=overlap,
+            train_ratio=train_ratio, seed=seed, bg_keep_ratio=bg_keep_ratio,
+            split_manifest=frozen, progress_callback=progress_callback,
+        )
+        return {"dataset_dir": str(dataset_dir), "class_names": class_names,
+                "export_stats": export_stats, **tiled}
+
 
     raw_path = Path(raw_dir)
     img_files = sorted((raw_path / "images").iterdir())
@@ -939,6 +956,7 @@ def prepare_full_dataset(
     oversample_factor: int = 5,
     bg_keep_ratio: float = 0.1,
     use_morphology: bool = True,
+    preserve_aspect: bool = False,
     dilate_kernel: int = 3,
     erode_kernel: int = 3,
     mask_dilate_kernel: int = 0,
@@ -996,6 +1014,7 @@ def prepare_full_dataset(
         dilate_kernel=dilate_kernel,
         erode_kernel=erode_kernel,
         use_morphology=use_morphology,
+        preserve_aspect=preserve_aspect,
         mask_dilate_kernel=mask_dilate_kernel,
     )
 
@@ -1040,6 +1059,7 @@ def prepare_full_dataset(
         train_ratio=train_ratio,
         oversample_factor=oversample_factor,
         bg_keep_ratio=bg_keep_ratio,
+        force_train_prefixes=export_stats.get("ok_stems", []),
     )
 
     # ---- 强制将 OK 图像（负样本）全部加入训练集 ----
