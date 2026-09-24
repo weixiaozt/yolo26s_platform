@@ -5,6 +5,7 @@
 
 import sys
 import threading
+import multiprocessing
 from pathlib import Path
 from typing import Literal
 
@@ -194,6 +195,15 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=409, detail="该组合（格式/精度/NMS/head模式）已导出，无需重复导出")
 
+    # OpenVINO/ONNX 使用的原生库在 Windows 上可能触发进程级崩溃。
+    # 同一任务重复提交也会放大这个问题，因此只允许一个导出子进程运行。
+    exporting = db.query(ExportedModel).filter(
+        ExportedModel.task_id == req.task_id,
+        ExportedModel.status == "exporting",
+    ).first()
+    if exporting:
+        raise HTTPException(status_code=409, detail="该任务已有模型转换正在进行，请等待完成或删除失败记录后重试")
+
     # 创建记录（half: 0=FP32, 1=FP16, 2=INT8）
     record = ExportedModel(
         task_id=req.task_id,
@@ -218,13 +228,50 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
         task = db.query(TrainTask).filter(TrainTask.id == req.task_id).first()
         if task and task.output_dir:
             dataset_path = str(Path(task.output_dir) / "dataset")
-    threading.Thread(
-        target=_do_export,
-        args=(export_id, src_path, req.export_format, req.imgsz, req.half, req.int8, req.nms, req.head_mode, dataset_path, display_class_names),
-        daemon=True,
-    ).start()
+    # 必须隔离到独立进程：Windows 原生 DLL 崩溃无法由 Python try/except 捕获，
+    # 若在 uvicorn 线程中执行会直接带崩整个 API 服务，前端随后全部变成 500。
+    ctx = multiprocessing.get_context("spawn")
+    try:
+        worker = ctx.Process(
+            target=_do_export,
+            args=(export_id, src_path, req.export_format, req.imgsz, req.half, req.int8,
+                  req.nms, req.head_mode, dataset_path, display_class_names),
+            name=f"model-export-{export_id}",
+        )
+        worker.start()
+        threading.Thread(
+            target=_watch_export_process,
+            args=(worker, export_id),
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        record.status = "failed"
+        record.error_message = f"启动导出进程失败: {exc}"
+        db.commit()
+        raise HTTPException(status_code=500, detail=record.error_message)
 
     return {"id": export_id, "status": "exporting", "message": "导出任务已启动"}
+
+
+def _watch_export_process(worker, export_id: int):
+    """回收导出子进程，并把原生崩溃转换成可见的失败状态。"""
+    try:
+        worker.join()
+        exit_code = worker.exitcode
+        if exit_code == 0:
+            return
+        db = SessionLocal()
+        try:
+            record = db.query(ExportedModel).filter(ExportedModel.id == export_id).first()
+            if record and record.status == "exporting":
+                record.status = "failed"
+                record.error_message = f"导出子进程异常退出（exit code {exit_code}），API 服务未受影响"
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        # 监控线程本身不能影响 API 服务；详细状态由导出子进程正常路径写入。
+        pass
 
 
 def _do_export(

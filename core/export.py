@@ -15,6 +15,7 @@
 """
 
 from pathlib import Path
+import sys
 from typing import Optional, Callable
 
 
@@ -99,6 +100,12 @@ def run_export(
         }
     """
     from ultralytics import YOLO
+
+    # Windows 上 onnxslim 的原生依赖可能访问冲突并终止进程，无法由
+    # Python 异常回退捕获。简化为可选优化，禁用后仍导出完整 ONNX 图。
+    if sys.platform == "win32" and simplify:
+        simplify = False
+        print("[export] Windows 跳过 ONNX slimming，避免原生库访问冲突")
 
     model_path = Path(model_path)
     output_dir = Path(output_dir)
