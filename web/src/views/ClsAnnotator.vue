@@ -103,6 +103,11 @@
           >
             <el-option v-for="(m,i) in inferModels" :key="i" :label="m.label" :value="i" />
           </el-select>
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px">
+            置信度
+            <el-input-number v-model="inferConfidence" :min="0" :max="1" :step="0.05"
+              :precision="2" :controls="false" size="small" aria-label="推理置信度" :disabled="inferLoading" />
+          </label>
           <el-button
             type="primary"
             size="small"
@@ -113,7 +118,7 @@
           >
             推理标注选中图
           </el-button>
-          <div class="infer-label-tip">仅处理选中图片，默认跳过已有标签。</div>
+          <div class="infer-label-tip">仅处理选中图片，跳过已有标签和低于置信度阈值的结果。</div>
         </div>
         <div class="filter-strip">
           <span>类别筛选</span>
@@ -181,6 +186,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { projectApi, type DefectClass, type ProjectStats } from '../api/project'
 import { imageApi, type ImageInfo } from '../api/image'
 import { annotationApi, type InferenceModelInfo } from '../api/annotation'
+import { useAnnotationPreferences } from '../composables/useAnnotationPreferences'
 
 const props = defineProps<{ projectId: string }>()
 const router = useRouter()
@@ -212,6 +218,7 @@ const classFilterText = computed(() => {
 const saveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
 const saveStateText = computed(() => ({ idle: '', saving: '保存中…', saved: '已保存', error: '保存失败' }[saveState.value]))
 const folderLabeling = ref(false)
+const { inferConfidence } = useAnnotationPreferences()
 const inferModels = ref<InferenceModelInfo[]>([])
 const inferModelIdx = ref(0)
 const inferLoading = ref(false)
@@ -401,6 +408,11 @@ async function applyClass(classId: number | null) {
 }
 
 async function runInferClassSelected() {
+  if (inferLoading.value) return
+  if (!Number.isFinite(inferConfidence.value) || inferConfidence.value < 0 || inferConfidence.value > 1) {
+    ElMessage.warning('请输入 0～1 之间的推理置信度')
+    return
+  }
   if (selected.value.size === 0) {
     ElMessage.info('请先选择要推理标注的图片')
     return
@@ -429,6 +441,7 @@ async function runInferClassSelected() {
       task_id: m.task_id,
       model_path: m.model_path,
       only_unlabeled: true,
+      conf: inferConfidence.value,
     })
 
     selected.value.clear()
@@ -438,7 +451,7 @@ async function runInferClassSelected() {
     await loadPage()
 
     ElMessage.success(
-      `推理标注完成：更新 ${data.updated} 张，跳过已有 ${data.skipped_existing} 张，未匹配 ${data.skipped_unmatched} 张，失败 ${data.failed} 张`,
+      `推理标注完成：更新 ${data.updated} 张，低置信度 ${data.skipped_low_confidence} 张，跳过已有 ${data.skipped_existing} 张，未匹配 ${data.skipped_unmatched} 张，失败 ${data.failed} 张`,
     )
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '推理标注失败')

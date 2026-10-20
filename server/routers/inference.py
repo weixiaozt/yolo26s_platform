@@ -4,6 +4,7 @@
 import sys
 import uuid
 import base64
+import math
 
 from datetime import datetime
 from pathlib import Path
@@ -694,6 +695,7 @@ def _poly_meta(poly, w: int, h: int):
 
 @router.post("/annotation-current")
 def infer_annotation_current(body: dict = Body(...), db: Session = Depends(get_db)):
+    conf_threshold = _annotation_confidence(body)
     image_id = int(body.get("image_id") or 0)
     task_id = int(body.get("task_id") or 0)
     model_path = body.get("model_path") or ""
@@ -714,7 +716,7 @@ def infer_annotation_current(body: dict = Body(...), db: Session = Depends(get_d
     skipped = 0
 
     if task_type == "obb":
-        pred = model.predict(img_array, verbose=False, conf=0.35, iou=0.5, device=device if device != "cpu" else "cpu")
+        pred = model.predict(img_array, verbose=False, conf=conf_threshold, iou=0.5, device=device if device != "cpu" else "cpu")
         r0 = pred[0] if pred else None
         obb = getattr(r0, "obb", None) if r0 is not None else None
         if obb is not None and obb.xyxyxyxy is not None and len(obb) > 0:
@@ -722,6 +724,8 @@ def infer_annotation_current(body: dict = Body(...), db: Session = Depends(get_d
             cls_ids = obb.cls.cpu().numpy().astype(int) if hasattr(obb.cls, "cpu") else obb.cls
             confs = obb.conf.cpu().numpy() if hasattr(obb.conf, "cpu") else obb.conf
             for poly_px, cls_idx, conf in zip(polys, cls_ids, confs):
+                if float(conf) < conf_threshold:
+                    continue
                 class_id = maps["index_to_id"].get(int(cls_idx))
                 if not class_id:
                     skipped += 1
@@ -754,7 +758,7 @@ def infer_annotation_current(body: dict = Body(...), db: Session = Depends(get_d
             image=img_array,
             crop_size=crop_size,
             overlap=overlap,
-            conf_thresh=0.35,
+            conf_thresh=conf_threshold,
             iou_thresh=0.5,
             resize_size=None,
             device=device,
@@ -764,6 +768,8 @@ def infer_annotation_current(body: dict = Body(...), db: Session = Depends(get_d
         )
 
         for i in range(result["num_detections"]):
+            if float(result["scores"][i]) < conf_threshold:
+                continue
             cls_idx = int(result["classes"][i])
             class_id = maps["index_to_id"].get(cls_idx)
             if not class_id:
@@ -796,6 +802,20 @@ def infer_annotation_current(body: dict = Body(...), db: Session = Depends(get_d
     }
 
 
+def _annotation_confidence(body: dict, default: float = 0.35) -> float:
+    """保持旧请求默认值，拒绝无效阈值；0 是合法输入。"""
+    value = body.get("conf", default)
+    try:
+        if isinstance(value, bool):
+            raise ValueError()
+        value = float(value)
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError()
+        return value
+    except (TypeError, ValueError):
+        raise HTTPException(422, "置信度必须是 0～1 之间的数字")
+
+
 @router.post("/annotation-cls-batch")
 def infer_annotation_cls_batch(body: dict = Body(...), db: Session = Depends(get_db)):
     from ..models.image import Image as ImageModel
@@ -807,6 +827,7 @@ def infer_annotation_cls_batch(body: dict = Body(...), db: Session = Depends(get
     only_unlabeled = bool(body.get("only_unlabeled", True))
     annotator = body.get("annotator")
     device = body.get("device") or _annotation_default_device()
+    conf_threshold = _annotation_confidence(body, default=0)
 
     if not image_ids:
         raise HTTPException(400, "image_ids 不能为空")
@@ -828,6 +849,7 @@ def infer_annotation_cls_batch(body: dict = Body(...), db: Session = Depends(get
     updated = 0
     skipped_existing = 0
     skipped_unmatched = 0
+    skipped_low_confidence = 0
     failed = 0
     items = []
 
@@ -847,6 +869,9 @@ def infer_annotation_cls_batch(body: dict = Body(...), db: Session = Depends(get
 
             top1 = int(probs.top1)
             conf = float(probs.top1conf)
+            if conf < conf_threshold:
+                skipped_low_confidence += 1
+                continue
             pred_name = model_names.get(top1, f"C{top1}")
             class_id = maps["name_to_id"].get(pred_name) or maps["index_to_id"].get(top1)
 
@@ -878,6 +903,7 @@ def infer_annotation_cls_batch(body: dict = Body(...), db: Session = Depends(get
         "updated": updated,
         "skipped_existing": skipped_existing,
         "skipped_unmatched": skipped_unmatched,
+        "skipped_low_confidence": skipped_low_confidence,
         "failed": failed,
         "items": items,
     }

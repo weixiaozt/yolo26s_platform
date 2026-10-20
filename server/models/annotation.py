@@ -16,6 +16,8 @@ class Annotation(Base):
 
     # 多边形坐标（归一化 0~1）: [{"x": 0.1, "y": 0.2}, {"x": 0.3, "y": 0.4}, ...]
     polygon: Mapped[list] = mapped_column(JSON, nullable=False)
+    # 仅推理产生的标注带分数；历史/人工标注为空，不伪造置信度。
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # 冗余字段：便于统计和过滤
     area: Mapped[float | None] = mapped_column(Float, nullable=True, comment="多边形面积(像素)")

@@ -137,6 +137,7 @@ def export_project_to_zip(project_id: int, db: Session, out_path: Path) -> dict:
                     "area": ann.area,
                     "bbox": ann.bbox,
                     "created_by": ann.created_by,
+                    "confidence": ann.confidence,
                 })
 
         zf.writestr("project.json", json.dumps(project_data, ensure_ascii=False, indent=2))
@@ -242,6 +243,7 @@ def export_full_project_to_zip(project_id: int, db: Session, out_path: Path) -> 
                     "area": ann.area,
                     "bbox": ann.bbox,
                     "created_by": ann.created_by,
+                    "confidence": ann.confidence,
                     "created_at": ann.created_at.isoformat() if ann.created_at else None,
                     "updated_at": ann.updated_at.isoformat() if ann.updated_at else None,
                 })
@@ -461,6 +463,7 @@ def import_full_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
                 area=ann.get("area"),
                 bbox=ann.get("bbox"),
                 created_by=ann.get("created_by"),
+                confidence=ann.get("confidence"),
                 created_at=_parse_dt(ann.get("created_at")) or datetime.now(),
                 updated_at=_parse_dt(ann.get("updated_at")) or datetime.now(),
             )
@@ -679,6 +682,7 @@ def import_project_from_zip(zip_file: BinaryIO, db: Session) -> dict:
                 area=ann.get("area"),
                 bbox=ann.get("bbox"),
                 created_by=ann.get("created_by"),
+                confidence=ann.get("confidence"),
             )
             db.add(a)
             imported_anns += 1
@@ -921,7 +925,8 @@ def merge_pack_into_project(
                         accepted[clsid].append(poly)
                         if not dry_run:
                             db.add(Annotation(image_id=tgt.id, class_id=clsid, polygon=poly,
-                                              area=a.get("area"), bbox=a.get("bbox"), created_by=a.get("created_by")))
+                                              area=a.get("area"), bbox=a.get("bbox"), created_by=a.get("created_by"),
+                                              confidence=a.get("confidence")))
                 new_status = _max_status(tgt.status, img_info.get("status", "unlabeled"))
                 if not dry_run and new_status != tgt.status:
                     tgt.status = new_status
@@ -987,7 +992,8 @@ def merge_pack_into_project(
                     if clsid is None:
                         continue
                     db.add(Annotation(image_id=nimg.id, class_id=clsid, polygon=a.get("polygon") or [],
-                                      area=a.get("area"), bbox=a.get("bbox"), created_by=a.get("created_by")))
+                                      area=a.get("area"), bbox=a.get("bbox"), created_by=a.get("created_by"),
+                                      confidence=a.get("confidence")))
                     report["added_annotations"] += 1
 
         if dry_run:

@@ -234,6 +234,7 @@ def _convert_copy(
             area=ann.area,
             bbox=ann.bbox,
             created_by=ann.created_by,
+            confidence=ann.confidence,
         )
         db.add(new_ann)
         ann_count += 1

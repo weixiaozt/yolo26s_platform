@@ -1,0 +1,5 @@
+ChillRoundF v3.0 (寒蝉全圆体)
+Source: https://github.com/Warren2060/ChillRound
+Commit: 46dda1602729b58de96e3fdee9f918d7aaa64727
+File: ChillRoundF v3.0.ttf
+License: SIL Open Font License 1.1; see ChillRound-LICENSE.txt

@@ -15,6 +15,7 @@ export interface AnnotationData {
   created_by?: string
   class_name?: string
   class_color?: string
+  confidence?: number | null
 }
 
 export interface AnnotationOut extends AnnotationData {
@@ -44,6 +45,7 @@ export const annotationApi = {
     api.get<InferenceModelInfo[]>('/inference/models', { params: { project_id: projectId } }),
 
   inferCurrent: (payload: {
+    conf?: number
     image_id: number
     project_id: number
     task_id?: number
@@ -52,6 +54,7 @@ export const annotationApi = {
     api.post<InferAnnotationResult>('/inference/annotation-current', payload),
 
   inferClassBatch: (payload: {
+    conf?: number
     project_id: number
     image_ids: number[]
     task_id?: number
@@ -78,6 +81,7 @@ export interface InferAnnotationResult {
 }
 
 export interface InferClassBatchResult {
+  skipped_low_confidence: number
   updated: number
   skipped_existing: number
   skipped_unmatched: number

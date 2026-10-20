@@ -3,7 +3,7 @@
 数据库引擎与 Session 管理
 """
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from .config import settings
@@ -118,12 +118,24 @@ def init_db():
             "COMMENT 'legacy=旧链路, native=one-to-one, compat=one-to-many+运行时NMS'",
             "exported_models.head_mode",
         ),
+        (
+            "ALTER TABLE annotations ADD COLUMN IF NOT EXISTS confidence FLOAT NULL "
+            "COMMENT '推理置信度，人工和历史标注为空'",
+            "annotations.confidence",
+        ),
     ]
     # MySQL 在字段/索引/约束已存在时分别报这些错；其它异常视为真正失败要打印出来。
     _ALREADY_EXISTS_TOKENS = ("Duplicate column", "Duplicate key", "Duplicate", "already exists", "errno: 121", "1060", "1061", "1826")
     for sql, label in migrations:
         with engine.connect() as conn:
             try:
+                # MySQL 不支持 ADD COLUMN IF NOT EXISTS：先查列再执行普通 ADD，
+                # 仍沿用下方重复列兜底，兼容多个服务同时启动。
+                if "ADD COLUMN IF NOT EXISTS" in sql and conn.dialect.name == "mysql":
+                    table, column = label.split(".")
+                    if any(c["name"] == column for c in inspect(conn).get_columns(table)):
+                        continue
+                    sql = sql.replace("ADD COLUMN IF NOT EXISTS", "ADD COLUMN")
                 conn.execute(text(sql))
                 conn.commit()
                 print(f"[迁移] 已添加 {label}")

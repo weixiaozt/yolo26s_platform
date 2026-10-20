@@ -30,6 +30,7 @@ def _annotation_to_out(ann: Annotation) -> AnnotationOut:
         area=ann.area,
         bbox=ann.bbox,
         created_by=ann.created_by,
+        confidence=ann.confidence,
         created_at=ann.created_at,
         updated_at=ann.updated_at,
         class_name=dc.name if dc else None,
@@ -97,6 +98,7 @@ def save_annotations(
             area=ann_data.area,
             bbox=ann_data.bbox,
             created_by=body.annotator or ann_data.created_by,
+            confidence=ann_data.confidence,
         )
         db.add(ann)
         db.flush()

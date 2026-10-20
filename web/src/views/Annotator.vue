@@ -1,15 +1,15 @@
 <template>
   <div class="annotator" tabindex="0" ref="rootRef">
-    <div class="toolbar">
+    <div class="toolbar" role="region" aria-label="编辑操作区">
       <div class="toolbar-left">
         <el-button text @click="goBack"><el-icon><ArrowLeft /></el-icon> 返回</el-button>
         <el-divider direction="vertical" />
-        <span class="filename">{{ currentImage?.filename }}</span>
+        <span class="filename" :title="currentImage?.filename">{{ currentImage?.filename }}</span>
         <el-tag :type="statusTagType" size="small" style="margin-left:8px">{{ statusLabel }}</el-tag>
       </div>
       <div class="toolbar-center">
         <el-radio-group v-model="currentTool" size="small" @change="onToolChange">
-          <el-radio-button label="select">选择</el-radio-button>
+          <el-radio-button label="select" title="选择（快捷键 V）">选择</el-radio-button>
           <el-radio-button label="polygon">多边形</el-radio-button>
           <el-radio-button label="rect">矩形</el-radio-button>
           <el-radio-button label="brush">涂抹</el-radio-button>
@@ -33,16 +33,30 @@
         <el-button size="small" title="向右旋转90°（快捷键 R）" @click="rotateView(90)"><el-icon><RefreshRight /></el-icon></el-button>
         <el-button size="small" type="danger" :disabled="annotations.length===0" @click="clearAll">清空</el-button>
       </div>
-      <div class="toolbar-right">
+      <div class="toolbar-status">
+        <span class="save-indicator" :class="saveState">{{ saveStateText }}</span>
+        <el-button v-if="currentImage?.status!=='reviewed'" @click="markAsOk" size="small" type="success">标记OK</el-button>
+        <el-button v-else @click="unmarkOk" size="small" type="warning">取消OK</el-button>
+      </div>
+    </div>
+    <div class="inference-toolbar" role="region" aria-label="推理标注功能区">
+        <span class="toolbar-section-label">推理模型</span>
         <el-select
-          v-model="inferModelIdx"
+          :model-value="inferModels.length ? inferModelIdx : undefined"
+          @update:model-value="inferModelIdx=$event"
           size="small"
           class="infer-model-select"
           :disabled="inferModels.length===0"
-          placeholder="选择推理模型"
+          :placeholder="inferModels.length ? '选择推理模型' : '暂无可用模型'"
         >
           <el-option v-for="(m,i) in inferModels" :key="i" :label="m.label" :value="i" />
         </el-select>
+        <label class="infer-confidence">
+          置信度
+          <el-input-number v-model="inferConfidence" :min="0" :max="1" :step="0.05"
+            :precision="2" :controls="false" size="small" aria-label="推理置信度"
+            :disabled="inferLoading" style="width:70px" />
+        </label>
         <el-button
           size="small"
           type="primary"
@@ -52,10 +66,6 @@
         >
           推理标注
         </el-button>
-        <span class="save-indicator" :class="saveState">{{ saveStateText }}</span>
-        <el-button v-if="currentImage?.status!=='reviewed'" @click="markAsOk" size="small" type="success">标记OK</el-button>
-        <el-button v-else @click="unmarkOk" size="small" type="warning">取消OK</el-button>
-      </div>
     </div>
     <div class="main-area">
       <div class="nav-panel">
@@ -83,7 +93,7 @@
         <div v-if="toolHint" class="draw-hint">{{ toolHint }}</div>
       </div>
       <div class="side-panel">
-        <div class="panel-section">
+        <div class="panel-section class-section">
           <div class="panel-title">当前类别</div>
           <div class="class-list">
             <div v-for="dc in defectClasses" :key="dc.id" :class="['class-item',{active:selectedClassId===dc.id}]" @click="selectedClassId=dc.id!">
@@ -93,15 +103,36 @@
             </div>
           </div>
         </div>
-        <div class="panel-section" style="flex:1;overflow-y:auto">
+        <div class="panel-section annotations-section">
           <div class="panel-title">标注列表 ({{ annotations.length }})</div>
-          <div v-if="annotations.length===0" class="empty-hint">暂无标注</div>
-          <div v-for="(ann,idx) in annotations" :key="idx" :class="['ann-item',{selected:selectedAnnIdx===idx}]" @click="selectAnn(idx)">
-            <span class="class-dot" :style="{background:clsColor(ann.class_id)}"></span>
-            <span class="ann-label">{{ clsName(ann.class_id) }} #{{ idx+1 }}</span>
-            <span class="ann-points">{{ ann.polygon.length }}点</span>
-            <el-button type="danger" text size="small" @click.stop="delAnn(idx)"><el-icon><Delete /></el-icon></el-button>
+          <div v-if="selectedAnnotation" class="selected-summary" aria-live="polite">
+            <span>{{ selectedAnnIndices.size>1 ? `已选 ${selectedAnnIndices.size} 个 · 当前` : '已选' }}</span>
+            #{{ selectedAnnIdx+1 }} {{ clsName(selectedAnnotation.class_id) }}
+            <span v-if="showConfidence && selectedAnnotation.confidence != null">
+              · 推理 {{ formatConfidence(selectedAnnotation.confidence) }}
+            </span>
           </div>
+          <div class="ann-list" ref="annListRef" role="listbox" aria-label="标注对象" aria-multiselectable="true">
+          <div v-if="annotations.length===0" class="empty-hint">暂无标注</div>
+          <div v-for="(ann,idx) in annotations" :key="idx" :data-ann-index="idx"
+            role="option" :aria-selected="selectedAnnIndices.has(idx)"
+            :class="['ann-item',{selected:selectedAnnIndices.has(idx)}]" @click="selectAnn(idx,$event.shiftKey)">
+            <span class="class-dot" :style="{background:clsColor(ann.class_id)}"></span>
+            <span class="ann-label">
+              <span class="ann-name" :title="`#${idx+1} ${clsName(ann.class_id)}`">#{{ idx+1 }} {{ clsName(ann.class_id) }}</span>
+              <small v-if="showConfidence && ann.confidence != null" class="ann-confidence">
+                推理 {{ formatConfidence(ann.confidence) }}
+              </small>
+            </span>
+            <span class="ann-points">{{ ann.polygon.length }}点</span>
+            <el-button type="danger" text size="small" :aria-label="`删除标注 #${idx+1}`" @click.stop="delAnn(idx)"><el-icon><Delete /></el-icon></el-button>
+          </div>
+          </div>
+        </div>
+        <div class="panel-section display-options">
+          <el-checkbox v-model="showClassNames" title="在图片上显示标注编号和类别名">显示信息</el-checkbox>
+          <el-checkbox v-model="showConfidence">显示置信度</el-checkbox>
+          <el-checkbox v-model="showAnnotationLayer">显示标注</el-checkbox>
         </div>
       </div>
     </div>
@@ -111,15 +142,8 @@
       <span>缩放:{{ Math.round(zoomLevel*100) }}%</span>
       <span v-if="viewRot!==0" style="color:#E6A23C">视图旋转:{{ viewRot }}°</span>
       <span v-if="currentImageIdx>=0">{{ currentImageIdx+1 }}/{{ imageList.length }}</span>
-      <span class="status-shortcuts">空格+拖拽移动 · 滚轮缩放</span>
+      <span class="status-shortcuts">V 选择 · 空格+拖拽平移 · 滚轮缩放 · Ctrl+Z 撤销</span>
       <div v-if="isSegTask" class="seg-view-controls">
-        <el-switch
-          v-model="showAnnotationLayer"
-          size="small"
-          inline-prompt
-          active-text="显"
-          inactive-text="隐"
-        />
         <el-radio-group v-model="imageChannel" size="small" class="channel-radio">
           <el-radio-button label="O">O</el-radio-button>
           <el-radio-button label="R">R</el-radio-button>
@@ -140,6 +164,8 @@ import { fabric } from 'fabric'
 import { projectApi, type DefectClass } from '../api/project'
 import { imageApi, type ImageInfo } from '../api/image'
 import { annotationApi, type AnnotationData, type Point, type InferenceModelInfo } from '../api/annotation'
+import { useAnnotationPreferences } from '../composables/useAnnotationPreferences'
+import { pointInPolygon, polygonIntersectsRect, clampGroupDelta } from '../utils/annotationGeometry'
 
 const props = defineProps<{ projectId: string; imageId: string }>()
 const router = useRouter()
@@ -152,9 +178,12 @@ const annotations = ref<AnnotationData[]>([])
 const projectTaskType = ref<'seg'|'det'|'cls'|'obb'>('seg')
 const selectedClassId = ref<number>(0)
 const selectedAnnIdx = ref(-1)
+const selectedAnnIndices = ref(new Set<number>())
+const selectedAnnotation = computed(() => annotations.value[selectedAnnIdx.value])
+const annListRef = ref<HTMLElement>()
 const currentTool = ref('select')
 const brushSize = ref(2)
-const showAnnotationLayer = ref(true)
+const { showAnnotations: showAnnotationLayer, showClassNames, showConfidence, inferConfidence } = useAnnotationPreferences()
 const imageChannel = ref<'O'|'R'|'G'|'B'>('O')
 const inferModels = ref<InferenceModelInfo[]>([])
 const inferModelIdx = ref(0)
@@ -165,14 +194,18 @@ watch(currentTool,()=>{lastBrushAnnIdx=-1;lastBrushPts=[]})
 watch(selectedClassId,()=>{lastBrushAnnIdx=-1;lastBrushPts=[]})
 watch(showAnnotationLayer,(visible)=>{
   if(suppressViewControlWatch)return
-  if(!isSegTask.value)return
   if(!visible){
-    selectedAnnIdx.value=-1
+    finishCanvasGesture()
+    clearSelection()
     removeVertexHandles()
     cancelDrawing()
+    canvas?.discardActiveObject()
   }
   renderAnnotations()
 })
+watch([showClassNames,showConfidence],()=>canvas?.requestRenderAll())
+watch(showConfidence,()=>centerSelectedAnnotation(),{flush:'post'})
+watch(selectedAnnIdx,()=>centerSelectedAnnotation(),{flush:'post'})
 watch(imageChannel,()=>{
   if(suppressViewControlWatch)return
   if(!isSegTask.value||!currentImage.value)return
@@ -199,13 +232,14 @@ const statusTagType = computed(()=>({unlabeled:'info',labeling:'warning',labeled
 const isSegTask = computed(()=>projectTaskType.value==='seg')
 const showBrushSize = computed(()=>['brush','circle','polyline','eraser'].includes(currentTool.value))
 const toolHint = computed(()=>{
+  if(!showAnnotationLayer.value)return '标注已隐藏，勾选“显示标注”后可编辑'
   if(spaceDown.value) return '按住空格拖拽移动画布'
   return({
     polygon:isDrawing.value?'点击加顶点·双击/回车完成·Esc取消':'点击开始画多边形',
     rect:'点击拖拽画矩形',
     brush:'按住涂抹·松开生成标注·按住 Shift 涂抹追加到上一段（大缺陷分多笔涂）',circle:'点击拖拽画圆',
     polyline:isDrawing.value?'点击加折点·双击/回车完成':'点击开始画折线',
-    eraser:'按住涂抹擦除标注区域',boxEraser:'拖拽框选删除',select:'点击标注后可拖动顶点编辑·拖动绿色圆点旋转·Ctrl+C复制·Ctrl+V粘贴',
+    eraser:'按住涂抹擦除标注区域',boxEraser:'拖拽框选删除',select:'左拖平移/顶点编辑 · Shift 点选/框选 · Ctrl 拖对象/绿点 · 双击适应窗口',
   })[currentTool.value]||''
 })
 const canvasAreaRef = ref<HTMLElement>()
@@ -223,10 +257,19 @@ let eraserPts:{x:number;y:number}[]=[]
 let circleStart:{x:number;y:number}|null=null
 let rectStart:{x:number;y:number}|null=null
 let boxEraserStart:{x:number;y:number}|null=null
-let editHandles:fabric.Circle[]=[]
+let editHandles:fabric.Object[]=[]
 let clipboard:AnnotationData|null=null   // 始终存原图坐标系（不随视图旋转失效）
 let autoSaveTimer:any=null
-let isPanning=false,lastPanX=0,lastPanY=0
+type CanvasGesture = {
+  kind:'pan'|'marquee'|'move'|'vertex'|'rotate'
+  start:Point; end:Point; clientStart:Point; viewport:number[]
+  hit:number; selectOnClick:boolean; toggle:boolean; moved:boolean
+  original:Map<number,Point[]>; snapshot?:string
+  pointIndex?:number; center?:Point; angle?:number
+}
+let canvasGesture:CanvasGesture|null=null
+let selectionMarquee:fabric.Rect|null=null
+const DRAG_THRESHOLD=4
 let bgLoadSeq=0
 let suppressViewControlWatch=false
 
@@ -321,6 +364,7 @@ function loadCanvasBackground(imageId:number,fit=true){
 
 function rotateView(delta:number){
   if(!canvas||!currentImage.value)return
+  finishCanvasGesture()
   cancelDrawing()
   removeVertexHandles()
   const oldRot=viewRot.value
@@ -336,7 +380,7 @@ function rotateView(delta:number){
   const bg=canvas.getObjects().find((o:any)=>o._bg) as fabric.Image|undefined
   if(bg)placeBgImage(bg)
   renderAnnotations()
-  if(currentTool.value==='select'&&selectedAnnIdx.value>=0)showVertexHandles(selectedAnnIdx.value)
+  if(currentTool.value==='select'&&selectedAnnIdx.value>=0)showSelectionHandles()
   zoomFit()
 }
 
@@ -462,7 +506,7 @@ function subtractEraserFromAnnotations(eraserPath:{x:number;y:number}[],eraserWi
     // 重新提取轮廓
     const newPoly=scanContour(ctx,cw,ch,ax1,ay1,W,H)
     if(newPoly.length>=3){
-      newAnns.push({class_id:ann.class_id,polygon:newPoly})
+      newAnns.push({...ann,polygon:newPoly})
     }
     // 如果 newPoly 为空，说明标注被完全擦掉了，不加入 newAnns
     changed=true
@@ -472,6 +516,7 @@ function subtractEraserFromAnnotations(eraserPath:{x:number;y:number}[],eraserWi
     pushUndo()
     annotations.value=newAnns
     dirty.value=true
+    clearSelection()
     renderAnnotations()
     scheduleAutoSave()
   }
@@ -494,12 +539,17 @@ function onWindowResize(){
 
 onMounted(async()=>{
   await loadProject();await loadInferModels();await loadImageList();initCanvas();await loadImageAndAnnotations()
+  document.fonts.load('12px "ChillRoundF"')
+    .then(()=>canvas?.requestRenderAll())
+    .catch(error=>console.warn('标注圆体字体加载失败，使用系统字体',error))
   window.addEventListener('keydown',onKD);window.addEventListener('keyup',onKU)
   window.addEventListener('beforeunload',onBeforeUnload)
   window.addEventListener('resize',onWindowResize)
+  window.addEventListener('blur',onWindowBlur)
   rootRef.value?.focus()
 })
 onBeforeUnmount(async ()=>{
+  finishCanvasGesture()
   // 组件卸载前 flush 未保存改动
   if(dirty.value){try{await handleSave({silent:true,immediate:true})}catch{}}
   if(autoSaveTimer)clearTimeout(autoSaveTimer)
@@ -507,10 +557,12 @@ onBeforeUnmount(async ()=>{
   window.removeEventListener('keydown',onKD);window.removeEventListener('keyup',onKU)
   window.removeEventListener('beforeunload',onBeforeUnload)
   window.removeEventListener('resize',onWindowResize)
+  window.removeEventListener('blur',onWindowBlur)
   if(canvas)canvas.dispose()
 })
 
 function onBeforeUnload(e:BeforeUnloadEvent){
+  finishCanvasGesture()
   if(dirty.value){
     e.preventDefault()
     e.returnValue=''
@@ -546,12 +598,18 @@ async function loadInferModels(){
 }
 
 async function runInferCurrent(){
+  if(inferLoading.value)return
   if(!currentImage.value)return
+  if(!Number.isFinite(inferConfidence.value)||inferConfidence.value<0||inferConfidence.value>1){
+    ElMessage.warning('请输入 0～1 之间的推理置信度')
+    return
+  }
   if(!selectedInferModel.value){
     ElMessage.warning('当前项目没有可用的 best.pt 模型')
     return
   }
   inferLoading.value=true
+  const requestImageId=currentImageId.value
   try{
     const m=selectedInferModel.value
     const{data}=await annotationApi.inferCurrent({
@@ -559,7 +617,12 @@ async function runInferCurrent(){
       project_id:parseInt(props.projectId),
       task_id:m.task_id,
       model_path:m.model_path,
+      conf:inferConfidence.value,
     })
+    if(requestImageId!==currentImageId.value){
+      ElMessage.info('已切换图片，未写入上一张图片的推理结果')
+      return
+    }
     if(!data.annotations.length){
       ElMessage.info(data.skipped?`没有可用结果，跳过 ${data.skipped} 个未匹配类别`:'未检出缺陷')
       return
@@ -569,6 +632,7 @@ async function runInferCurrent(){
       polygon:sanitizePolygon(a.polygon).map(origToDisp),
       bbox:a.bbox,
       area:a.area,
+      confidence:a.confidence,
     }))
     if(!(await ensureCanAddDefect()))return
 
@@ -592,11 +656,12 @@ async function runInferCurrent(){
       }
     }
 
+    if(requestImageId!==currentImageId.value)return
     pushUndo()
     annotations.value=mode==='replace'?inferred:[...annotations.value,...inferred]
     setLocalImageStatus('labeled',annotations.value.length)
     dirty.value=true
-    selectedAnnIdx.value=-1
+    clearSelection()
     removeVertexHandles()
     renderAnnotations()
     scheduleAutoSave()
@@ -611,9 +676,11 @@ async function runInferCurrent(){
 function initCanvas(){
   if(!canvasAreaRef.value)return
   const w=canvasAreaRef.value.clientWidth,h=canvasAreaRef.value.clientHeight
-  canvas=new fabric.Canvas('annotationCanvas',{width:w,height:h,backgroundColor:'#2a2a2a',selection:false})
+  canvas=new fabric.Canvas('annotationCanvas',{width:w,height:h,backgroundColor:'#2a2a2a',selection:false,fireRightClick:true,fireMiddleClick:true})
+  canvas.on('after:render',drawAnnotationLabels)
 
   canvas.on('mouse:wheel',(opt)=>{
+    if(canvasGesture){opt.e.preventDefault();return}
     let z=canvas!.getZoom()*(opt.e.deltaY>0?0.92:1.08)
     z=Math.max(0.05,Math.min(30,z))
     canvas!.zoomToPoint({x:opt.e.offsetX,y:opt.e.offsetY} as fabric.Point,z)
@@ -621,20 +688,16 @@ function initCanvas(){
   })
 
   canvas.on('mouse:down',(opt)=>{
+    rootRef.value?.focus({preventScroll:true})
     if(spaceDown.value||opt.e.button===2||opt.e.button===1){
-      isPanning=true;lastPanX=opt.e.clientX;lastPanY=opt.e.clientY;canvas!.setCursor('grab');return
+      beginCanvasGesture(opt,true);return
     }
     if(opt.e.button!==0)return
-    if(isSegTask.value&&!showAnnotationLayer.value)return
     const p=canvas!.getPointer(opt.e),tool=currentTool.value
-    // select 工具：点 polygon 选中（顶点 handle 由 fabric 自己处理 evented）
     if(tool==='select'){
-      const tgt=opt.target as any
-      if(tgt&&tgt._ann)selectAnn(tgt._idx)
-      else if(tgt&&tgt._handle){/* 让 fabric 处理拖动 */}
-      else if(!tgt){selectedAnnIdx.value=-1;removeVertexHandles();highlightSelected()}
-      return
+      beginCanvasGesture(opt);return
     }
+    if(!showAnnotationLayer.value)return
     if(tool==='polygon')onPolyClick(p)
     else if(tool==='polyline')onPolylineClick(p)
     else if(tool==='brush'){isBrushing=true;brushPts=[{x:p.x,y:p.y}]}
@@ -645,11 +708,7 @@ function initCanvas(){
   })
 
   canvas.on('mouse:move',(opt)=>{
-    if(isPanning){
-      const vpt=canvas!.viewportTransform!
-      vpt[4]+=opt.e.clientX-lastPanX;vpt[5]+=opt.e.clientY-lastPanY
-      canvas!.requestRenderAll();lastPanX=opt.e.clientX;lastPanY=opt.e.clientY;return
-    }
+    if(canvasGesture){moveCanvasGesture(opt.e);return}
     const p=canvas!.getPointer(opt.e)
     if(currentTool.value==='polygon'&&isDrawing.value)drawTmpLine(p)
     else if(currentTool.value==='polyline'&&isDrawing.value)drawTmpLine(p)
@@ -661,7 +720,7 @@ function initCanvas(){
   })
 
   canvas.on('mouse:up',(opt)=>{
-    if(isPanning){isPanning=false;canvas!.setCursor('default');return}
+    if(canvasGesture){moveCanvasGesture(opt.e);finishCanvasGesture();return}
     const p=canvas!.getPointer(opt.e)
     if(currentTool.value==='brush'&&isBrushing)finishBrush(!!(opt.e as any).shiftKey)
     else if(currentTool.value==='eraser'&&isErasing)finishEraser()
@@ -671,19 +730,172 @@ function initCanvas(){
   })
 
   canvas.on('mouse:dblclick',()=>{
-    if(currentTool.value==='polygon'&&isDrawing.value)finishPolygon()
+    if(currentTool.value==='select')zoomFit()
+    else if(currentTool.value==='polygon'&&isDrawing.value)finishPolygon()
     else if(currentTool.value==='polyline'&&isDrawing.value)finishPolyline()
   })
   canvasAreaRef.value.addEventListener('contextmenu',e=>e.preventDefault())
 }
 
+function hitAnnotation(p:Point, selectedOnly=false){
+  if(!showAnnotationLayer.value)return -1
+  const normalized={x:p.x/dispW(),y:p.y/dispH()}
+  for(let i=annotations.value.length-1;i>=0;i--){
+    if(selectedOnly&&!selectedAnnIndices.value.has(i))continue
+    if(pointInPolygon(normalized,annotations.value[i].polygon))return i
+  }
+  return -1
+}
+
+function hitSelectionHandle(p:Point,target:any){
+  if(!showAnnotationLayer.value||!canvas)return null
+  if(target?._rotHandle)return target
+  // 小顶点保留 1 个屏幕像素的点击余量，密集处取最近点，避免命中后绘制的邻点。
+  let nearest:any=null,best=Infinity
+  for(let i=editHandles.length-1;i>=0;i--){
+    const handle=editHandles[i] as any
+    if(handle._ptIdx===undefined)continue
+    const point=annotations.value[handle._annIdx]?.polygon[handle._ptIdx]
+    if(!point)continue
+    const distance=Math.hypot(p.x-point.x*dispW(),p.y-point.y*dispH())*canvas.getZoom()
+    const radius=(handle.radius+handle.strokeWidth/2)*canvas.getZoom()+1
+    if(distance<=radius&&distance<best){nearest=handle;best=distance}
+  }
+  return nearest
+}
+
+function beginCanvasGesture(opt:any,forcePan=false){
+  if(!canvas||!currentImage.value||canvasGesture)return
+  const e=opt.e,p=canvas.getPointer(e),target=opt.target
+  const handle=hitSelectionHandle(p,target)
+  const hit=handle?handle._annIdx:hitAnnotation(p)
+  const selectedHit=handle&&!handle._rotHandle?handle._annIdx:hitAnnotation(p,true)
+  let kind:CanvasGesture['kind']='pan'
+  // 固定本次手势：Shift 框选；Ctrl 拖顶点也只移动整组；普通左拖顶点才修点。
+  if(!forcePan&&showAnnotationLayer.value){
+    if(e.shiftKey)kind='marquee'
+    else if(e.ctrlKey&&handle?._rotHandle)kind='rotate'
+    else if(e.ctrlKey&&selectedHit>=0)kind='move'
+    else if(!e.ctrlKey&&handle&&!handle._rotHandle)kind='vertex'
+  }
+  const g:CanvasGesture={
+    kind,start:p,end:p,clientStart:{x:e.clientX,y:e.clientY},viewport:[...canvas.viewportTransform!],
+    hit,selectOnClick:!forcePan&&showAnnotationLayer.value,toggle:!!e.shiftKey,moved:false,original:new Map(),
+  }
+  if(['move','vertex','rotate'].includes(kind)){
+    g.snapshot=JSON.stringify(annotations.value)
+    const indices=kind==='move'?[...selectedAnnIndices.value]:[handle._annIdx]
+    indices.forEach(idx=>g.original.set(idx,annotations.value[idx].polygon.map(p=>({...p}))))
+    if(kind==='move')selectedAnnIdx.value=selectedHit
+    if(kind!=='move'){
+      selectedAnnIdx.value=handle._annIdx
+      g.hit=handle._annIdx
+      g.pointIndex=handle._ptIdx
+      const points=g.original.get(g.hit)!
+      g.center={x:points.reduce((s,p)=>s+p.x,0)/points.length*dispW(),y:points.reduce((s,p)=>s+p.y,0)/points.length*dispH()}
+      g.angle=Math.atan2(p.y-g.center.y,p.x-g.center.x)
+    }
+    // 不能在拖动半途自动保存；松开后统一提交，并只生成一个撤销记录。
+    if(autoSaveTimer){clearTimeout(autoSaveTimer);autoSaveTimer=null}
+  }
+  canvasGesture=g
+}
+
+function moveCanvasGesture(e:MouseEvent){
+  const g=canvasGesture
+  if(!canvas||!g)return
+  const dx=e.clientX-g.clientStart.x,dy=e.clientY-g.clientStart.y
+  if(!g.moved&&Math.hypot(dx,dy)<DRAG_THRESHOLD)return
+  g.moved=true
+  if(g.kind==='pan'){
+    const vpt=[...g.viewport]
+    vpt[4]+=dx;vpt[5]+=dy
+    canvas.setViewportTransform(vpt)
+    canvas.setCursor('grabbing')
+    canvas.requestRenderAll()
+    return
+  }
+  // 视口在非平移手势中固定，使用起始像素差，避免 Fabric 缓存指针带来的偏差。
+  const p={x:g.start.x+dx/g.viewport[0],y:g.start.y+dy/g.viewport[3]}
+  g.end=p
+  if(g.kind==='marquee'){
+    if(!selectionMarquee){
+      selectionMarquee=new fabric.Rect({fill:'rgba(64,158,255,.12)',stroke:'#409eff',selectable:false,evented:false})
+      canvas.add(selectionMarquee)
+    }
+    selectionMarquee.set({
+      left:Math.min(g.start.x,p.x),top:Math.min(g.start.y,p.y),
+      width:Math.abs(p.x-g.start.x),height:Math.abs(p.y-g.start.y),
+      strokeWidth:1/canvas.getZoom(),strokeDashArray:[5/canvas.getZoom(),3/canvas.getZoom()],
+    })
+    canvas.setCursor('crosshair');canvas.requestRenderAll()
+    return
+  }
+  const W=dispW(),H=dispH()
+  if(g.kind==='move'){
+    const delta=clampGroupDelta([...g.original.values()],{x:(p.x-g.start.x)/W,y:(p.y-g.start.y)/H})
+    g.original.forEach((polygon,idx)=>{
+      annotations.value[idx].polygon=polygon.map(pt=>({x:pt.x+delta.x,y:pt.y+delta.y}))
+    })
+  }else if(g.kind==='vertex'){
+    const polygon=g.original.get(g.hit)!.map(pt=>({...pt}))
+    const original=polygon[g.pointIndex!]
+    polygon[g.pointIndex!]={x:Math.max(0,Math.min(1,original.x+(p.x-g.start.x)/W)),y:Math.max(0,Math.min(1,original.y+(p.y-g.start.y)/H))}
+    annotations.value[g.hit].polygon=polygon
+  }else if(g.kind==='rotate'){
+    const center=g.center!,angle=Math.atan2(p.y-center.y,p.x-center.x)-g.angle!
+    const cos=Math.cos(angle),sin=Math.sin(angle)
+    annotations.value[g.hit].polygon=g.original.get(g.hit)!.map(pt=>{
+      const x=pt.x*W-center.x,y=pt.y*H-center.y
+      return {x:Math.max(0,Math.min(1,(center.x+x*cos-y*sin)/W)),y:Math.max(0,Math.min(1,(center.y+x*sin+y*cos)/H))}
+    })
+  }
+  // 按当前坐标重建轮廓和手柄，保证 pathOffset、边界与命中区域始终一致。
+  renderAnnotations()
+  showSelectionHandles()
+  canvas.setCursor(g.kind==='rotate'?'crosshair':'move')
+}
+
+function finishCanvasGesture(cancel=false){
+  const g=canvasGesture
+  if(!g||!canvas)return
+  canvasGesture=null
+  if(selectionMarquee){canvas.remove(selectionMarquee);selectionMarquee=null}
+  canvas.setCursor('default')
+  if(g.snapshot){
+    if(cancel){
+      g.original.forEach((polygon,idx)=>{annotations.value[idx].polygon=polygon})
+    }else if(g.snapshot!==JSON.stringify(annotations.value)){
+      pushUndo(g.snapshot)
+      dirty.value=true
+    }
+    renderAnnotations();showSelectionHandles()
+    if(dirty.value)scheduleAutoSave()
+  }else if(!cancel&&g.selectOnClick){
+    if(g.moved&&g.kind==='marquee'){
+      const start={x:g.start.x/dispW(),y:g.start.y/dispH()},end={x:g.end.x/dispW(),y:g.end.y/dispH()}
+      const hits=annotations.value.flatMap((ann,idx)=>polygonIntersectsRect(ann.polygon,start,end)?[idx]:[])
+      if(hits.length)applySelection(new Set([...selectedAnnIndices.value,...hits]),hits[hits.length-1])
+    }else if(!g.moved){
+      if(g.hit>=0)selectAnn(g.hit,g.toggle)
+      else if(!g.toggle)clearSelection()
+    }
+  }
+}
+
+function onWindowBlur(){
+  spaceDown.value=false
+  finishCanvasGesture()
+}
+
 function onToolChange(){
+  finishCanvasGesture()
   cancelDrawing()
-  // 重建 polygon 让 selectable 状态切换（select 工具可拖整体，其他工具不可）
+  // 手势由选择工具统一管理，其他绘制工具保持原来的绘制逻辑。
   renderAnnotations()
   // 仅在 select 工具下显示顶点 handle，其他工具关掉避免事件冲突
   if(currentTool.value==='select'){
-    if(selectedAnnIdx.value>=0) showVertexHandles(selectedAnnIdx.value)
+    if(selectedAnnIdx.value>=0) showSelectionHandles()
   }else{
     removeVertexHandles()
   }
@@ -694,7 +906,6 @@ async function loadImageAndAnnotations(){
   currentImage.value=imageList.value.find(i=>i.id===currentImageId.value)||null
   viewRot.value=rotMap.get(currentImageId.value)??0
   suppressViewControlWatch=true
-  showAnnotationLayer.value=true
   imageChannel.value='O'
   suppressViewControlWatch=false
   removeVertexHandles()
@@ -708,6 +919,7 @@ async function loadImageAndAnnotations(){
     if(reqImageId!==currentImageId.value)return  // 切图了，本次响应作废
     annotations.value=data.map(a=>({
       class_id:a.class_id,
+      confidence:a.confidence,
       // 加载时也 clamp，避免历史 VOC 导入的越界数据被原样回写造成 422；
       // 再从原图坐标系换算到当前显示坐标系（viewRot=0 时为恒等）
       polygon:sanitizePolygon((a.polygon as any[]).map(p => Array.isArray(p) ? {x:p[0],y:p[1]} : {x:p.x,y:p.y})).map(origToDisp)
@@ -719,78 +931,36 @@ async function loadImageAndAnnotations(){
     if(reqImageId===currentImageId.value) annotations.value=[]
   }
   if(reqImageId!==currentImageId.value)return
-  dirty.value=false;undoStack.value=[];redoStack.value=[];selectedAnnIdx.value=-1
+  dirty.value=false;undoStack.value=[];redoStack.value=[];clearSelection()
 }
 
 function renderAnnotations(){
   if(!canvas||!currentImage.value)return
   canvas.getObjects().filter(o=>(o as any)._ann).forEach(o=>canvas!.remove(o))
-  if(isSegTask.value&&!showAnnotationLayer.value){
+  if(!showAnnotationLayer.value){
     removeVertexHandles()
     canvas.requestRenderAll()
     return
   }
   const W=dispW(),H=dispH()
-  // select 工具下让 polygon 可拖动整体平移（其他工具下保持 evented=true 用于点击选中，但禁拖）
+  // 禁用 Fabric 原生拖动，避免和画布平移、Ctrl 编辑手势同时生效。
   const isSelectTool=currentTool.value==='select'
   annotations.value.forEach((ann,idx)=>{
     const c=clsColor(ann.class_id)
     const pts=ann.polygon.map(p=>({x:p.x*W,y:p.y*H}))
     const poly=new fabric.Polygon(pts,{
-      fill:c+'55',stroke:c,strokeWidth:0.75,
-      selectable:isSelectTool,
+      fill:c+'55',stroke:c,strokeWidth:0.375,
+      selectable:false,
       hasControls:false,hasBorders:false,
       lockRotation:true,lockScalingX:true,lockScalingY:true,
-      hoverCursor:isSelectTool?'move':'default',
+      hoverCursor:isSelectTool?'grab':'default',
       objectCaching:false,
     })
     ;(poly as any)._ann=true
     ;(poly as any)._idx=idx
-    // 整体拖动：mousedown 记录原点，moving 同步 handles，modified 应用偏移到数据
-    let dragOrigin:{left:number,top:number}|null=null
-    poly.on('mousedown',()=>{
-      if(currentTool.value!=='select')return
-      dragOrigin={left:poly.left||0,top:poly.top||0}
-    })
-    poly.on('moving',()=>{
-      if(!dragOrigin||!currentImage.value)return
-      const dx=(poly.left||0)-dragOrigin.left
-      const dy=(poly.top||0)-dragOrigin.top
-      // 实时同步顶点 handles 跟随
-      const W2=dispW(),H2=dispH()
-      const ann_=annotations.value[idx]
-      if(!ann_)return
-      editHandles.forEach((h,i)=>{
-        const pt=ann_.polygon[i]
-        if(!pt)return
-        h.set({left:pt.x*W2+dx-6,top:pt.y*H2+dy-6})
-        h.setCoords()
-      })
-      canvas!.requestRenderAll()
-    })
-    poly.on('modified',()=>{
-      if(!dragOrigin||!currentImage.value)return
-      const dx=(poly.left||0)-dragOrigin.left
-      const dy=(poly.top||0)-dragOrigin.top
-      dragOrigin=null
-      // 阈值过滤：< 0.5px 视为没动（避免单击也触发 dirty）
-      if(Math.abs(dx)<0.5&&Math.abs(dy)<0.5)return
-      pushUndo()
-      const W2=dispW(),H2=dispH()
-      annotations.value[idx].polygon=annotations.value[idx].polygon.map(p=>({
-        x:Math.max(0,Math.min(1,p.x+dx/W2)),
-        y:Math.max(0,Math.min(1,p.y+dy/H2)),
-      }))
-      dirty.value=true
-      scheduleAutoSave()
-      // 重建 polygon（让 fabric 的 left/top 复位）+ 重建 handles
-      renderAnnotations()
-      if(selectedAnnIdx.value===idx) showVertexHandles(idx)
-      highlightSelected()
-    })
     canvas!.add(poly)
   })
-  canvas.requestRenderAll()
+  highlightSelected()
 }
 
 // ====== 多边形 ======
@@ -859,7 +1029,7 @@ function drawCirclePrev(p:{x:number;y:number}){
   if(!canvas||!circleStart)return;cleanTmp()
   const c=clsColor(selectedClassId.value)
   const r=Math.sqrt((p.x-circleStart.x)**2+(p.y-circleStart.y)**2)
-  const ci=new fabric.Circle({left:circleStart.x-r,top:circleStart.y-r,radius:r,fill:c+'33',stroke:c,strokeWidth:1,selectable:false,evented:false})
+  const ci=new fabric.Circle({left:circleStart.x-r,top:circleStart.y-r,radius:r,fill:c+'33',stroke:c,strokeWidth:0.5,selectable:false,evented:false})
   ;(ci as any)._tmp=true;canvas.add(ci);canvas.requestRenderAll()
 }
 async function finishCircle(p:{x:number;y:number}){
@@ -878,7 +1048,7 @@ function drawRectPrev(p:{x:number;y:number}){
   const c=clsColor(selectedClassId.value)
   const x=Math.min(rectStart.x,p.x),y=Math.min(rectStart.y,p.y)
   const w=Math.abs(p.x-rectStart.x),h=Math.abs(p.y-rectStart.y)
-  const r=new fabric.Rect({left:x,top:y,width:w,height:h,fill:c+'33',stroke:c,strokeWidth:1,selectable:false,evented:false})
+  const r=new fabric.Rect({left:x,top:y,width:w,height:h,fill:c+'33',stroke:c,strokeWidth:0.5,selectable:false,evented:false})
   ;(r as any)._tmp=true;canvas.add(r);canvas.requestRenderAll()
 }
 async function finishRect(p:{x:number;y:number}){
@@ -917,7 +1087,7 @@ function finishBoxEraser(){
   if(!t){boxEraserStart=null;return}
   const l=(t.left||0)/W,tp=(t.top||0)/H,r=l+(t.width||0)/W,b=tp+(t.height||0)/H
   const rm:number[]=[];annotations.value.forEach((a,i)=>{if(a.polygon.some(p=>p.x>=l&&p.x<=r&&p.y>=tp&&p.y<=b))rm.push(i)})
-  if(rm.length>0){pushUndo();for(let i=rm.length-1;i>=0;i--)annotations.value.splice(rm[i],1);dirty.value=true;selectedAnnIdx.value=-1;removeVertexHandles();scheduleAutoSave()}
+  if(rm.length>0){pushUndo();for(let i=rm.length-1;i>=0;i--)annotations.value.splice(rm[i],1);dirty.value=true;clearSelection();removeVertexHandles();scheduleAutoSave()}
   boxEraserStart=null;cleanTmp();renderAnnotations()
 }
 
@@ -961,7 +1131,7 @@ async function markAsOk(){
     }catch{return}
   }
   // 清空标注并保存到数据库（OK=无缺陷的负样本）
-  pushUndo(); annotations.value=[]; dirty.value=false
+  pushUndo(); annotations.value=[]; dirty.value=false;clearSelection()
   await annotationApi.save(currentImageId.value,[])
   await imageApi.updateStatus(currentImageId.value,'reviewed')
   setLocalImageStatus('reviewed',0)
@@ -976,7 +1146,7 @@ async function unmarkOk(){
 }
 async function clearAll(){
   try{await ElMessageBox.confirm('确定清空所有标注？','清空',{confirmButtonText:'清空',cancelButtonText:'取消',type:'warning'})}catch{return}
-  pushUndo();annotations.value=[];dirty.value=true;selectedAnnIdx.value=-1;removeVertexHandles();renderAnnotations();scheduleAutoSave()
+  pushUndo();annotations.value=[];dirty.value=true;clearSelection();removeVertexHandles();renderAnnotations();scheduleAutoSave()
 }
 
 // ====== 通用 ======
@@ -1008,7 +1178,7 @@ function addAnn(polygon:Point[]){
 }
 function drawDotFixed(x:number,y:number){
   if(!canvas)return;const c=clsColor(selectedClassId.value)
-  const d=new fabric.Circle({left:x-2,top:y-2,radius:2,fill:'#FFF',stroke:c,strokeWidth:1,selectable:false,evented:false})
+  const d=new fabric.Circle({left:x-0.4,top:y-0.4,radius:0.4,fill:'#FFF',stroke:c,strokeWidth:0.2,selectable:false,evented:false})
   ;(d as any)._tmp=true;canvas.add(d);canvas.requestRenderAll()
 }
 function drawDotAt(p:{x:number;y:number},color:string){
@@ -1020,181 +1190,137 @@ function drawTmpLine(p:{x:number;y:number}){
   if(!canvas||drawingPoints.length===0)return
   canvas.getObjects().filter(o=>(o as any)._tl).forEach(o=>canvas!.remove(o))
   const last=drawingPoints[drawingPoints.length-1],c=clsColor(selectedClassId.value)
-  const ln=new fabric.Line([last.x,last.y,p.x,p.y],{stroke:c,strokeWidth:0.75,strokeDashArray:[5,3],selectable:false,evented:false})
+  const ln=new fabric.Line([last.x,last.y,p.x,p.y],{stroke:c,strokeWidth:0.375,strokeDashArray:[5,3],selectable:false,evented:false})
   ;(ln as any)._tmp=true;(ln as any)._tl=true;canvas.add(ln);canvas.requestRenderAll()
 }
 function cancelDrawing(){isDrawing.value=false;drawingPoints=[];isBrushing=false;brushPts=[];isErasing=false;eraserPts=[];circleStart=null;rectStart=null;boxEraserStart=null;lastBrushAnnIdx=-1;lastBrushPts=[];cleanTmp()}
 function cleanTmp(){if(!canvas)return;canvas.getObjects().filter(o=>(o as any)._tmp).forEach(o=>canvas!.remove(o));canvas.requestRenderAll()}
-function selectAnn(idx:number){
-  selectedAnnIdx.value=idx
+function clearSelection(){
+  selectedAnnIndices.value=new Set()
+  selectedAnnIdx.value=-1
+  removeVertexHandles()
   highlightSelected()
-  // 选中后显示顶点 handles（仅在 select 工具下，避免与其他工具的鼠标事件冲突）
-  if(currentTool.value==='select') showVertexHandles(idx)
-  else removeVertexHandles()
+}
+
+function applySelection(indices:Set<number>,primary:number){
+  selectedAnnIndices.value=indices
+  selectedAnnIdx.value=indices.has(primary)?primary:([...indices].pop()??-1)
+  highlightSelected()
+  showSelectionHandles()
+  nextTick(centerSelectedAnnotation)
+}
+
+async function selectAnn(idx:number,toggle=false){
+  if(!annotations.value[idx])return
+  if(!showAnnotationLayer.value){
+    showAnnotationLayer.value=true
+    await nextTick()
+  }
+  const indices=toggle?new Set(selectedAnnIndices.value):new Set<number>()
+  if(toggle&&indices.has(idx))indices.delete(idx)
+  else indices.add(idx)
+  applySelection(indices,indices.has(idx)?idx:selectedAnnIdx.value)
+}
+
+function centerSelectedAnnotation(){
+  const list=annListRef.value
+  const row=list?.querySelector<HTMLElement>(`[data-ann-index="${selectedAnnIdx.value}"]`)
+  if(!list||!row)return
+  const offset=row.getBoundingClientRect().top-list.getBoundingClientRect().top
+  list.scrollTop+=offset-(list.clientHeight-row.offsetHeight)/2
+}
+
+function formatConfidence(conf:number){return `${(conf*100).toFixed(1)}%`}
+
+// 在上一版 6px 基础上再缩小三分之二，适应窗口时为 2px，随后同比缩放。
+let annotationLabelReferenceZoom=1
+function drawAnnotationLabels(){
+  if(!canvas||!showAnnotationLayer.value||(!showClassNames.value&&!showConfidence.value))return
+  const ctx=canvas.getContext()
+  const ratio=canvas.getRetinaScaling()
+  const scale=canvas.getZoom()/annotationLabelReferenceZoom/6
+  const labelHeight=21*scale
+  ctx.save()
+  ctx.setTransform(ratio,0,0,ratio,0,0)
+  ctx.font=`${12*scale}px "ChillRoundF", "Microsoft YaHei", sans-serif`
+  ctx.textBaseline='middle'
+  // 选中对象最后绘制，密集标注时优先看清它的完整名称与置信度。
+  const objects=canvas.getObjects().filter(o=>(o as any)._ann)
+  objects.sort((a,b)=>Number((a as any)._idx===selectedAnnIdx.value)-Number((b as any)._idx===selectedAnnIdx.value))
+  for(const object of objects){
+    const idx=(object as any)._idx
+    const ann=annotations.value[idx]
+    if(!ann)continue
+    const parts=[]
+    if(showClassNames.value)parts.push(`#${idx+1} ${clsName(ann.class_id)}`)
+    if(showConfidence.value&&ann.confidence!=null)parts.push(formatConfidence(ann.confidence))
+    if(!parts.length)continue
+    const bounds=object.getBoundingRect(false,true)
+    if(bounds.left+bounds.width<0||bounds.top+bounds.height<0||bounds.left>canvas.width!||bounds.top>canvas.height!)continue
+    const label=parts.join(' · ')
+    const width=ctx.measureText(label).width+12*scale
+    const left=Math.max(0,Math.min(bounds.left,canvas.width!-width))
+    const top=Math.max(0,Math.min(bounds.top-labelHeight-2*scale,canvas.height!-labelHeight))
+    ctx.fillStyle=selectedAnnIndices.value.has(idx)?'rgba(15,65,110,.95)':'rgba(20,20,20,.82)'
+    ctx.fillRect(left,top,width,labelHeight)
+    ctx.fillStyle=clsColor(ann.class_id)
+    ctx.fillRect(left,top,3*scale,labelHeight)
+    ctx.fillStyle='#fff'
+    ctx.fillText(label,left+7*scale,top+labelHeight/2)
+  }
+  ctx.restore()
 }
 
 function highlightSelected(){
   if(!canvas)return
-  const idx=selectedAnnIdx.value
   canvas.getObjects().forEach(o=>{
     if((o as any)._ann){
-      const i=(o as any)._idx
-      o.set({strokeWidth:i===idx?1.5:0.75,opacity:idx<0?1:(i===idx?1:0.7)})
+      const selected=selectedAnnIndices.value.has((o as any)._idx)
+      o.set({strokeWidth:selected?0.75:0.375,opacity:selectedAnnIndices.value.size===0||selected?1:0.7})
     }
   })
   canvas.requestRenderAll()
 }
 
-// ====== 顶点编辑 + 整体旋转（仅 select 工具）======
-function showVertexHandles(idx:number){
+// ====== 所有选中对象的顶点与旋转手柄；左拖顶点，Ctrl 拖对象或绿点 ======
+function showSelectionHandles(){
   removeVertexHandles()
-  if(!canvas||!currentImage.value)return
-  if(isSegTask.value&&!showAnnotationLayer.value)return
-  const ann=annotations.value[idx]
-  if(!ann)return
+  if(!canvas||!currentImage.value||!showAnnotationLayer.value||currentTool.value!=='select')return
   const W=dispW(),H=dispH()
-
-  // ---- 旋转手柄（绿色圆点，在 polygon 上方）----
-  const xsAll=ann.polygon.map(p=>p.x*W)
-  const ysAll=ann.polygon.map(p=>p.y*H)
-  const rotCx=xsAll.reduce((a,b)=>a+b,0)/xsAll.length
-  const rotCy=ysAll.reduce((a,b)=>a+b,0)/ysAll.length
-  const rotMinY=Math.min(...ysAll)
-  const rotHandleY=Math.max(8,rotMinY-22)   // 上方 22 px，至少留 8px
-  const rotR=5
-  // 中心 → 手柄的虚线连接
-  const stem=new fabric.Line([rotCx,rotCy,rotCx,rotHandleY],{
-    stroke:'#52C41A',strokeWidth:1,strokeDashArray:[3,3],
-    selectable:false,evented:false,
-  })
-  ;(stem as any)._handle=true
-  canvas.add(stem)
-  editHandles.push(stem)
-
-  const rotHandle=new fabric.Circle({
-    left:rotCx-rotR,top:rotHandleY-rotR,radius:rotR,
-    fill:'#52C41A',stroke:'#fff',strokeWidth:1.5,
-    hasControls:false,hasBorders:false,
-    selectable:true,evented:true,
-    hoverCursor:'crosshair',
-    originX:'left',originY:'top',
-    lockRotation:true,lockScalingX:true,lockScalingY:true,
-  })
-  ;(rotHandle as any)._handle=true
-  ;(rotHandle as any)._rotHandle=true
-  ;(rotHandle as any)._annIdx=idx
-  // 缓存：mousedown 时记录原始 polygon + 起始角度，moving 时基于增量旋转避免累积误差
-  let origPoly:Point[]|null=null
-  let origAngle=0
-  let rotMoved=false
-  rotHandle.on('mousedown',()=>{
-    origPoly=ann.polygon.map(p=>({x:p.x,y:p.y}))
-    const sx=(rotHandle.left||0)+rotR-rotCx
-    const sy=(rotHandle.top||0)+rotR-rotCy
-    origAngle=Math.atan2(sy,sx)
-    rotMoved=false
-  })
-  rotHandle.on('moving',()=>{
-    if(!origPoly||!currentImage.value)return
-    rotMoved=true
-    const W2=dispW(),H2=dispH()
-    const hx=(rotHandle.left||0)+rotR
-    const hy=(rotHandle.top||0)+rotR
-    const angleNow=Math.atan2(hy-rotCy,hx-rotCx)
-    const delta=angleNow-origAngle
-    const cosD=Math.cos(delta),sinD=Math.sin(delta)
-    for(let i=0;i<origPoly.length;i++){
-      const px=origPoly[i].x*W2-rotCx
-      const py=origPoly[i].y*H2-rotCy
-      const nx=rotCx+px*cosD-py*sinD
-      const ny=rotCy+px*sinD+py*cosD
-      annotations.value[idx].polygon[i]={
-        x:Math.max(0,Math.min(1,nx/W2)),
-        y:Math.max(0,Math.min(1,ny/H2)),
-      }
+  // 当前对象最后绘制，重叠手柄时优先响应最近选择的对象。
+  const indices=[...selectedAnnIndices.value].sort((a,b)=>Number(a===selectedAnnIdx.value)-Number(b===selectedAnnIdx.value))
+  for(const idx of indices){
+    const ann=annotations.value[idx]
+    if(!ann)continue
+    const points=ann.polygon.map(p=>({x:p.x*W,y:p.y*H}))
+    const cx=points.reduce((s,p)=>s+p.x,0)/points.length,cy=points.reduce((s,p)=>s+p.y,0)/points.length
+    const rotating=canvasGesture?.kind==='rotate'&&canvasGesture.hit===idx&&canvasGesture.moved
+    const rotPoint=rotating?canvasGesture!.end:{x:cx,y:Math.max(8,Math.min(...points.map(p=>p.y))-22)}
+    const stem=new fabric.Line([cx,cy,rotPoint.x,rotPoint.y],{
+      stroke:'#52C41A',strokeWidth:1,strokeDashArray:[3,3],selectable:false,evented:false,
+    })
+    ;(stem as any)._handle=true
+    canvas.add(stem);editHandles.push(stem)
+    const addHandle=(p:Point,radius:number,pointIndex?:number)=>{
+      const rotation=pointIndex===undefined
+      const handle=new fabric.Circle({
+        left:p.x-radius,top:p.y-radius,radius,
+        fill:rotation?'#52C41A':'#fff',stroke:rotation?'#fff':'#409EFF',strokeWidth:rotation?1.5:0.2,
+        hasControls:false,hasBorders:false,selectable:false,evented:true,hoverCursor:rotation?'grab':'move',
+        originX:'left',originY:'top',
+      })
+      Object.assign(handle,{_handle:true,_annIdx:idx,_ptIdx:pointIndex,_rotHandle:rotation})
+      canvas!.add(handle);editHandles.push(handle)
     }
-    // 实时更新 polygon 显示
-    const polyObj=canvas!.getObjects().find(o=>(o as any)._ann&&(o as any)._idx===idx) as fabric.Polygon|undefined
-    if(polyObj){
-      const pts=annotations.value[idx].polygon.map(pt=>({x:pt.x*W2,y:pt.y*H2}))
-      polyObj.set({points:pts as any})
-      ;(polyObj as any)._calcDimensions?.()
-      polyObj.setCoords()
-      polyObj.dirty=true
-    }
-    // 同步更新虚线连接
-    stem.set({x1:rotCx,y1:rotCy,x2:hx,y2:hy})
-    ;(stem as any).setCoords?.()
-    canvas!.requestRenderAll()
-  })
-  rotHandle.on('modified',()=>{
-    if(!rotMoved){origPoly=null;return}   // 没真的拖动，不入栈不触发保存
-    pushUndo()  // 旋转完成入 undo（拖一次只入栈一次）
-    origPoly=null
-    dirty.value=true
-    scheduleAutoSave()
-    renderAnnotations()
-    showVertexHandles(idx)   // 重建 handles 到新位置
-    highlightSelected()
-  })
-  canvas.add(rotHandle)
-  editHandles.push(rotHandle)
-
-  // ---- 4 个角顶点 ----
-  ann.polygon.forEach((p,i)=>{
-    const handle=new fabric.Circle({
-      left:p.x*W-3,top:p.y*H-3,radius:3,
-      fill:'#fff',stroke:'#409EFF',strokeWidth:1,
-      hasControls:false,hasBorders:false,
-      selectable:true,evented:true,
-      hoverCursor:'move',
-      originX:'left',originY:'top',
-      lockRotation:true,lockScalingX:true,lockScalingY:true,
-    })
-    ;(handle as any)._handle=true
-    ;(handle as any)._annIdx=idx
-    ;(handle as any)._ptIdx=i
-    let firstMove=true
-    handle.on('mousedown',()=>{firstMove=true})
-    handle.on('moving',()=>{
-      if(!currentImage.value)return
-      // 第一次移动才入栈，避免单击也 push undo
-      if(firstMove){pushUndo();firstMove=false}
-      const W2=dispW(),H2=dispH()
-      const cx=(handle.left||0)+3,cy=(handle.top||0)+3
-      // clamp 到画布范围（防止越界后端 422）
-      const nx=Math.max(0,Math.min(1,cx/W2))
-      const ny=Math.max(0,Math.min(1,cy/H2))
-      annotations.value[idx].polygon[i]={x:nx,y:ny}
-      // 实时更新对应 polygon 形状（不全量重绘，性能更好）
-      const polyObj=canvas!.getObjects().find(o=>(o as any)._ann&&(o as any)._idx===idx) as fabric.Polygon|undefined
-      if(polyObj){
-        const pts=annotations.value[idx].polygon.map(pt=>({x:pt.x*W2,y:pt.y*H2}))
-        polyObj.set({points:pts as any})
-        ;(polyObj as any)._calcDimensions?.()
-        polyObj.setCoords()
-        polyObj.dirty=true
-      }
-      canvas!.requestRenderAll()
-    })
-    handle.on('modified',()=>{
-      if(firstMove)return // 没真的拖动
-      dirty.value=true;scheduleAutoSave()
-      // 拖动结束后完整重建 polygon 形状 + handles，
-      // 避免 fabric 内部 pathOffset/边界不一致导致后续选中显示错位
-      renderAnnotations()
-      showVertexHandles(idx)
-      highlightSelected()
-    })
-    canvas!.add(handle)
-    editHandles.push(handle)
-  })
-  canvas!.requestRenderAll()
+    addHandle(rotPoint,5)
+    points.forEach((p,i)=>addHandle(p,0.6,i))
+  }
+  canvas.requestRenderAll()
 }
 
 function removeVertexHandles(){
   if(!canvas)return
-  canvas.getObjects().filter(o=>(o as any)._handle).forEach(o=>canvas!.remove(o))
+  editHandles.forEach(handle=>canvas!.remove(handle))
   editHandles=[]
 }
 
@@ -1208,6 +1334,7 @@ function copyAnn(){
   ElMessage.info('已复制')
 }
 async function pasteAnn(){
+  if(!showAnnotationLayer.value)return
   if(!clipboard||!currentImage.value)return
   if(!(await ensureCanAddDefect()))return
   const W=dispW(),H=dispH()
@@ -1221,16 +1348,15 @@ async function pasteAnn(){
   annotations.value.push({class_id:clipboard.class_id,polygon:newPoly})
   setLocalImageStatus('labeled',annotations.value.length)
   dirty.value=true
-  selectedAnnIdx.value=annotations.value.length-1
   renderAnnotations()
-  if(currentTool.value==='select') showVertexHandles(selectedAnnIdx.value)
+  applySelection(new Set([annotations.value.length-1]),annotations.value.length-1)
   scheduleAutoSave()
   ElMessage.success('已粘贴')
 }
-function delAnn(idx:number){pushUndo();annotations.value.splice(idx,1);dirty.value=true;selectedAnnIdx.value=-1;removeVertexHandles();renderAnnotations();scheduleAutoSave()}
-function pushUndo(){undoStack.value.push(JSON.stringify(annotations.value));redoStack.value=[];if(undoStack.value.length>50)undoStack.value.shift()}
-function undo(){if(!canUndo.value)return;redoStack.value.push(JSON.stringify(annotations.value));annotations.value=JSON.parse(undoStack.value.pop()!);dirty.value=true;selectedAnnIdx.value=-1;removeVertexHandles();renderAnnotations();scheduleAutoSave()}
-function redo(){if(!canRedo.value)return;undoStack.value.push(JSON.stringify(annotations.value));annotations.value=JSON.parse(redoStack.value.pop()!);dirty.value=true;selectedAnnIdx.value=-1;removeVertexHandles();renderAnnotations();scheduleAutoSave()}
+function delAnn(idx:number){pushUndo();annotations.value.splice(idx,1);dirty.value=true;clearSelection();removeVertexHandles();renderAnnotations();scheduleAutoSave()}
+function pushUndo(snapshot=JSON.stringify(annotations.value)){undoStack.value.push(snapshot);redoStack.value=[];if(undoStack.value.length>50)undoStack.value.shift()}
+function undo(){finishCanvasGesture();if(!canUndo.value)return;redoStack.value.push(JSON.stringify(annotations.value));annotations.value=JSON.parse(undoStack.value.pop()!);dirty.value=true;clearSelection();renderAnnotations();scheduleAutoSave()}
+function redo(){finishCanvasGesture();if(!canRedo.value)return;undoStack.value.push(JSON.stringify(annotations.value));annotations.value=JSON.parse(redoStack.value.pop()!);dirty.value=true;clearSelection();renderAnnotations();scheduleAutoSave()}
 
 /**
  * 标注变化后调度自动保存（600ms 防抖）。
@@ -1244,6 +1370,7 @@ function scheduleAutoSave(){
 }
 
 async function handleSave(opt:{silent?:boolean;immediate?:boolean}={}){
+  if(canvasGesture?.snapshot){scheduleAutoSave();return}
   if(autoSaveTimer){clearTimeout(autoSaveTimer);autoSaveTimer=null}
   if(saving.value) return // 上一次保存还在进行
   if(!dirty.value && !opt.immediate) return
@@ -1282,6 +1409,7 @@ async function handleSave(opt:{silent?:boolean;immediate?:boolean}={}){
 }
 
 async function switchImage(id:number){
+  finishCanvasGesture()
   // 切图前 flush 自动保存（避免丢失最近改动）
   if(dirty.value){
     try{await handleSave({silent:true,immediate:true})}
@@ -1290,7 +1418,7 @@ async function switchImage(id:number){
       catch{return}
     }
   }
-  removeVertexHandles();selectedAnnIdx.value=-1
+  removeVertexHandles();clearSelection()
   lastBrushAnnIdx=-1;lastBrushPts=[]
   currentImageId.value=id;await loadImageAndAnnotations()
 }
@@ -1299,19 +1427,25 @@ function nextImage(){if(hasNext.value)switchImage(imageList.value[currentImageId
 function goBack(){router.push(`/project/${props.projectId}`)}
 function zoomFit(){
   if(!canvas||!canvasAreaRef.value)return
+  finishCanvasGesture()
   const bg=canvas.getObjects().find(o=>(o as any)._bg);if(!bg)return
   // 用显示坐标系尺寸（旋转 90/270 时宽高互换），不能直接用 fabric 对象的 width/height
   const cw=canvasAreaRef.value.clientWidth,ch=canvasAreaRef.value.clientHeight
   const iw=dispW(),ih=dispH()
   const z=Math.min(cw/iw,ch/ih)*0.95
-  canvas.setViewportTransform([1,0,0,1,0,0])
-  canvas.zoomToPoint(new fabric.Point(cw/2,ch/2),z)
-  const vpt=canvas.viewportTransform!;vpt[4]=(cw-iw*z)/2;vpt[5]=(ch-ih*z)/2
+  annotationLabelReferenceZoom=z
+  // 一次更新视口及命中坐标，避免适应窗口后多边形仍使用旧的点击范围。
+  canvas.setViewportTransform([z,0,0,z,(cw-iw*z)/2,(ch-ih*z)/2])
   canvas.requestRenderAll();zoomLevel.value=z
 }
 function onKD(e:KeyboardEvent){
+  if((e.target as HTMLElement)?.closest('input:not([type="radio"]):not([type="checkbox"]):not([type="button"]):not([type="submit"]),textarea,select,[contenteditable="true"],[role="spinbutton"]'))return
   if(e.code==='Space'){e.preventDefault();spaceDown.value=true}
-  else if(e.key==='Escape')cancelDrawing()
+  else if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&(e.key==='v'||e.key==='V')){
+    e.preventDefault()
+    if(currentTool.value!=='select'){currentTool.value='select';onToolChange()}
+  }
+  else if(e.key==='Escape'){finishCanvasGesture(true);cancelDrawing()}
   else if(e.key==='Enter'&&isDrawing.value){if(currentTool.value==='polygon')finishPolygon();else if(currentTool.value==='polyline')finishPolyline()}
   else if(e.ctrlKey&&e.key==='z'){e.preventDefault();undo()}
   else if(e.ctrlKey&&e.key==='y'){e.preventDefault();redo()}
@@ -1333,11 +1467,23 @@ function imgSC(img:ImageInfo){return{'sc-u':img.status==='unlabeled','sc-l':img.
 </script>
 
 <style scoped>
+@font-face{font-family:ChillRoundF;src:url('/fonts/ChillRoundF.ttf') format('truetype');font-style:normal;font-weight:400;font-display:swap}
 .annotator{display:flex;flex-direction:column;height:100vh;background:#1a1a1a;color:#ddd;outline:none}
-.toolbar{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:#2d2d2d;border-bottom:1px solid #444;min-height:48px;gap:8px;flex-wrap:wrap}
-.toolbar-left,.toolbar-center,.toolbar-right{display:flex;align-items:center;gap:6px}
+.toolbar{display:grid;grid-template-columns:minmax(160px,1fr) minmax(0,max-content) minmax(160px,1fr);align-items:center;padding:6px 12px;background:#2d2d2d;border-bottom:1px solid #444;height:48px;box-sizing:border-box;gap:12px;flex-shrink:0}
+.toolbar-left,.toolbar-center,.toolbar-status{display:flex;align-items:center;gap:6px}
+.toolbar-left{width:100%;max-width:300px;min-width:0}
+.toolbar-left .el-button,.toolbar-left .el-divider,.toolbar-left .el-tag{flex-shrink:0}
+.toolbar-center{min-width:0;overflow-x:auto;white-space:nowrap}
+.toolbar-center>*{flex-shrink:0}
+.toolbar-center :deep(.el-radio-group){display:inline-flex;flex-wrap:nowrap}
+.toolbar-status{justify-self:end;flex-shrink:0}
+.inference-toolbar{display:flex;align-items:center;gap:10px;padding:6px 12px;background:#252525;border-bottom:1px solid #444;min-height:44px;box-sizing:border-box;flex-shrink:0;overflow-x:auto;white-space:nowrap}
+.inference-toolbar>*{flex-shrink:0}
+.inference-toolbar>:first-child{margin-left:auto}
+.toolbar-section-label{font-size:12px;color:#aaa}
 .infer-model-select{width:220px}
-.filename{font-weight:500;font-size:14px}
+.infer-confidence{display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap}
+.filename{font-weight:500;font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .brush-size-ctrl{display:flex;align-items:center;gap:6px}
 .ctrl-label{font-size:12px;color:#aaa}.ctrl-value{font-size:12px;color:#aaa;min-width:36px}
 .seg-view-controls{display:flex;align-items:center;gap:8px;margin-left:8px}
@@ -1359,16 +1505,25 @@ function imgSC(img:ImageInfo){return{'sc-u':img.status==='unlabeled','sc-l':img.
 .nav-footer{display:flex;gap:4px;padding:8px;border-top:1px solid #333}
 .canvas-area{flex:1;position:relative;overflow:hidden}
 .draw-hint{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.7);color:#eee;padding:6px 16px;border-radius:20px;font-size:12px;pointer-events:none}
-.side-panel{width:240px;background:#252525;border-left:1px solid #444;display:flex;flex-direction:column}
-.panel-section{border-bottom:1px solid #333}.panel-title{padding:10px 12px;font-size:13px;font-weight:600;color:#aaa}
+.side-panel{--ann-row-height:36px;width:270px;flex-shrink:0;min-height:0;background:#252525;border-left:1px solid #444;display:flex;flex-direction:column}
+.class-section{flex:1;min-height:120px;overflow:hidden;display:flex;flex-direction:column}
+.class-section .class-list{flex:1;min-height:0;overflow-y:auto}
+.annotations-section{flex:0 1 auto;min-height:0;display:flex;flex-direction:column}
+.ann-list{height:calc(var(--ann-row-height) * 10);flex:0 1 auto;min-height:0;overflow-y:auto;position:relative}
+.display-options{display:flex;flex-wrap:nowrap;align-items:center;justify-content:space-between;gap:6px;padding:5px 8px;flex-shrink:0}
+.display-options :deep(.el-checkbox){color:#ddd;margin-right:0;height:22px}
+.display-options :deep(.el-checkbox__label){font-size:11px;padding-left:4px;line-height:18px}
+.selected-summary{padding:6px 12px;background:#15354e;font-size:12px;color:#d2eaff;overflow-wrap:anywhere;flex-shrink:0}
+.ann-confidence{display:block;color:#93caff;font-size:11px;line-height:14px}
+.panel-section{border-bottom:1px solid #333}.panel-title{padding:10px 12px;font-size:13px;font-weight:600;color:#aaa;flex-shrink:0}
 .class-list{padding:0 8px 10px}
 .class-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;cursor:pointer;transition:background .15s}
 .class-item:hover{background:#333}.class-item.active{background:#1a3a5c}
 .class-dot{width:14px;height:14px;border-radius:3px;flex-shrink:0}.class-name{flex:1;font-size:13px}.class-count{font-size:12px;color:#888}
 .empty-hint{padding:20px;text-align:center;color:#666;font-size:13px}
-.ann-item{display:flex;align-items:center;gap:6px;padding:6px 12px;cursor:pointer;transition:background .15s}
-.ann-item:hover{background:#333}.ann-item.selected{background:#1a3a5c}
-.ann-label{flex:1;font-size:12px}.ann-points{font-size:11px;color:#888}
+.ann-item{display:flex;align-items:center;gap:6px;height:var(--ann-row-height);box-sizing:border-box;padding:4px 9px;border-left:3px solid transparent;cursor:pointer;transition:background .15s}
+.ann-item:hover{background:#333}.ann-item.selected{background:#1a3a5c;border-left-color:#409eff}
+.ann-label{flex:1;min-width:0;font-size:12px;line-height:14px}.ann-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ann-points{font-size:11px;color:#888;flex-shrink:0}
 .statusbar{display:flex;align-items:center;gap:24px;padding:4px 16px;background:#2d2d2d;border-top:1px solid #444;font-size:12px;color:#888}
 .status-shortcuts{margin-left:auto;color:#666}
 .save-indicator{font-size:12px;min-width:80px;text-align:right;transition:color .2s}

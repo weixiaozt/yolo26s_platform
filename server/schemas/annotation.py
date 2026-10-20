@@ -15,6 +15,7 @@ class AnnotationCreate(BaseModel):
     area: Optional[float] = None
     bbox: Optional[dict] = None
     created_by: Optional[str] = None
+    confidence: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
 
 
 class AnnotationOut(BaseModel):
@@ -30,6 +31,7 @@ class AnnotationOut(BaseModel):
     # 关联的类别信息
     class_name: Optional[str] = None
     class_color: Optional[str] = None
+    confidence: Optional[float] = None
     model_config = {"from_attributes": True}
 
 
