@@ -191,8 +191,12 @@ def run_export(req: ExportRequest, db: Session = Depends(get_db)):
         ExportedModel.nms == (1 if requested_nms else 0),
         ExportedModel.head_mode == req.head_mode,
         ExportedModel.status == "completed",
-    ).first()
-    if existing:
+    ).order_by(ExportedModel.id.desc()).first()
+    # 旧记录共用 weights/best_openvino_model 等目录，可能已被另一模式
+    # 覆盖；仅复用记录独占且实际存在的产物，旧导出允许重新生成。
+    expected_dir = Path(src_path).parent / "exports" / f"export_{existing.id}" if existing else None
+    if (existing and existing.export_path and Path(existing.export_path).exists()
+            and Path(existing.export_path).resolve().is_relative_to(expected_dir.resolve())):
         raise HTTPException(status_code=409, detail="该组合（格式/精度/NMS/head模式）已导出，无需重复导出")
 
     # OpenVINO/ONNX 使用的原生库在 Windows 上可能触发进程级崩溃。
@@ -294,7 +298,7 @@ def _do_export(
             return
 
         from core.export import run_export
-        output_dir = str(Path(src_path).parent / "exports")
+        output_dir = str(Path(src_path).parent / "exports" / f"export_{export_id}")
         result = run_export(
             model_path=src_path,
             output_dir=output_dir,

@@ -45,8 +45,7 @@ class ExportHeadModeTests(unittest.TestCase):
         )
 
         self.assertEqual(mode, "compat")
-        self.assertEqual(kwargs, {"end2end": False})
-        self.assertNotIn("nms", kwargs)
+        self.assertEqual(kwargs, {"end2end": False, "nms": False})
         self.assertNotIn("conf", kwargs)
 
     def test_yolo26_native_does_not_inject_traditional_nms(self):
@@ -57,7 +56,12 @@ class ExportHeadModeTests(unittest.TestCase):
         )
 
         self.assertEqual(mode, "native")
-        self.assertEqual(kwargs, {})
+        self.assertEqual(kwargs, {"end2end": True, "nms": False})
+
+    def test_yolo26_omitted_mode_defaults_to_native(self):
+        mode, kwargs = _resolve_head_export_args(is_end2end=True)
+        self.assertEqual(mode, "native")
+        self.assertEqual(kwargs, {"end2end": True, "nms": False})
 
     def test_invalid_mode_is_rejected(self):
         with self.assertRaises(ValueError):

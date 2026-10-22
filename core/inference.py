@@ -26,6 +26,7 @@
 """
 
 import time
+from core.model_modes import use_native_pytorch_head
 
 import cv2
 import numpy as np
@@ -101,6 +102,7 @@ def load_model(model_path: str, model_type: str = "auto", device: str = None):
         if device:
             model.to(device)
     
+    use_native_pytorch_head(model)
     return model, model_type
 
 
@@ -291,6 +293,7 @@ def infer_single_image(
         }
     """
     start_time = time.time()  # 开始计时
+    use_native_pytorch_head(model)
     
     orig_h, orig_w = image.shape[:2]
 

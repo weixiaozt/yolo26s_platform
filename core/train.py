@@ -306,18 +306,11 @@ def run_train(
         augment_copy_paste = 0.0
         augment_mixup = 0.0
     elif is_obb:
-        # OBB 必须用 -obb 后缀模型（Ultralytics 仅 yolov8/yolo11 系列支持）
+        # 保留用户选择的 YOLO 系列；继承训练的实际权重路径无需改名。
         ml = model_name.lower()
-        if "-obb" not in ml:
+        if "-obb" not in ml and not Path(model_name).is_file():
             base = ml.replace("-seg", "").replace("-cls", "").replace(".pt", "")
-            # OBB 任务族目前 yolo11 系列最稳定，强制走 yolo11
-            # 提取规模字母 (n/s/m/l/x)
-            size_letter = "s"
-            for ch in ("n", "s", "m", "l", "x"):
-                if base.endswith(ch):
-                    size_letter = ch
-                    break
-            model_name = f"yolo11{size_letter}-obb.pt"
+            model_name = f"{base}-obb.pt"
             print(f"[task_type=obb] 自动切换 OBB 模型: {model_name}")
 
     # ---- 加载预训练模型 ----

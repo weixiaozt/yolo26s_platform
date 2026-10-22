@@ -76,7 +76,9 @@ def _get_model(model_path: str, task_type: str | None = None, device: str | None
             pass
 
     from ultralytics import YOLO
+    from core.model_modes import use_native_pytorch_head
     model = YOLO(model_path, task=explicit_task) if explicit_task else YOLO(model_path)
+    use_native_pytorch_head(model)
     _model_cache[cache_key] = model
     if len(_model_cache) > 4:
         _model_cache.pop(next(iter(_model_cache)))
@@ -131,7 +133,44 @@ def list_models(project_id: int = Query(default=0), db: Session = Depends(get_db
         models.append({"task_id": e.task_id, "model_format": e.export_format,
             "label": f"{tname} — {e.source_type}.{fmt_map.get(e.export_format, e.export_format)} ({fp})",
             "model_path": e.export_path})
-    return models
+
+    export_by_path = {str(e.export_path): e for e in reversed(exports)}
+    seen_paths = set()
+    available = []
+    for item in models:
+        path = Path(item["model_path"])
+        path_key = str(path.resolve()).casefold()
+        if path_key in seen_paths or not path.exists():
+            continue
+        seen_paths.add(path_key)
+        task = task_by_id.get(item["task_id"])
+        name = str((task.config or {}).get("model_name", "")).lower() if task else ""
+        dual_head = ("yolo26" in name or "yolo10" in name) and "-cls" not in name
+        mode = "native" if dual_head and item["model_format"] == "pytorch" else "legacy"
+        if item["model_format"] != "pytorch":
+            record = export_by_path.get(item["model_path"])
+            mode = (record.head_mode or "legacy") if record else "legacy"
+            # 旧导出记录可能共用目录，以实际元数据区分原生与兼容。
+            if dual_head and item["model_format"] == "openvino":
+                metadata = (path if path.is_dir() else path.parent) / "metadata.yaml"
+                if metadata.is_file():
+                    import yaml
+                    try:
+                        data = yaml.safe_load(metadata.read_text(encoding="utf-8"))
+                    except (OSError, UnicodeError, yaml.YAMLError):
+                        data = None
+                    data = data if isinstance(data, dict) else {}
+                    if isinstance(data.get("end2end"), bool):
+                        mode = "native" if data["end2end"] else "compat"
+        item.update(model_name=name, head_mode=mode)
+        if mode in ("native", "compat"):
+            item["label"] += " [原生]" if mode == "native" else " [兼容]"
+        available.append(item)
+    # 稳定排序保留同组内的新旧任务和 best/last 顺序；兼容模型排在最后。
+    return sorted(available, key=lambda m: (
+        m["head_mode"] == "compat",
+        0 if "yolo26" in m["model_name"] else (2 if "yolo11" in m["model_name"] else 1),
+    ))
 
 
 @router.get("/devices")

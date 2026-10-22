@@ -74,7 +74,7 @@
               </el-alert>
             </template>
             <el-alert v-else type="info" :closable="false">
-              <div style="font-size:12px">从头训练：使用预训练的 YOLO26s-seg 权重开始，适合首次训练或类别变更后。</div>
+              <div style="font-size:12px">从头训练：使用所选模型的预训练权重开始，适合首次训练或类别变更后。</div>
             </el-alert>
           </el-card>
 
@@ -86,39 +86,10 @@
             </el-form-item>
             <el-form-item label="模型尺寸">
               <el-select v-model="c.model_name" style="width:100%">
-                <template v-if="taskType === 'cls'">
-                  <el-option label="yolo11n-cls.pt · Nano — 最快，~1.5M 参数（推荐小数据）" value="yolo11n-cls.pt" />
-                  <el-option label="yolo11s-cls.pt · Small — 均衡，~5M 参数" value="yolo11s-cls.pt" />
-                  <el-option label="yolo11m-cls.pt · Medium — 更精准，~10M 参数" value="yolo11m-cls.pt" />
-                  <el-option label="yolo11l-cls.pt · Large — 高精度，~13M 参数" value="yolo11l-cls.pt" />
-                </template>
-                <template v-else-if="taskType === 'det'">
-                  <el-option label="yolo26n.pt · Nano — 最快，~3M 参数（推荐小数据）" value="yolo26n.pt" />
-                  <el-option label="yolo26s.pt · Small — 均衡，~22M 参数" value="yolo26s.pt" />
-                  <el-option label="yolo26m.pt · Medium — 更精准，~38M 参数" value="yolo26m.pt" />
-                  <el-option label="yolo26l.pt · Large — 高精度，~58M 参数" value="yolo26l.pt" />
-                </template>
-                <template v-else-if="taskType === 'obb'">
-                  <el-option label="yolo11n-obb.pt · Nano — 最快，~3M 参数（推荐先试）" value="yolo11n-obb.pt" />
-                  <el-option label="yolo11s-obb.pt · Small — 均衡，~10M 参数（推荐）" value="yolo11s-obb.pt" />
-                  <el-option label="yolo11m-obb.pt · Medium — 更精准，~21M 参数" value="yolo11m-obb.pt" />
-                  <el-option label="yolo11l-obb.pt · Large — 高精度，~27M 参数" value="yolo11l-obb.pt" />
-                  <el-option label="yolo11x-obb.pt · XLarge — 最精准，~58M 参数" value="yolo11x-obb.pt" />
-                </template>
-                <template v-else>
-                  <el-option label="yolo11n-seg · Nano — 最快，~3M 参数（OpenVINO 兼容好）" value="yolo11n-seg" />
-                  <el-option label="yolo11s-seg · Small — 均衡，~10M 参数（推荐 / OpenVINO 兼容好）" value="yolo11s-seg" />
-                  <el-option label="yolo11m-seg · Medium — 更精准，~22M 参数（OpenVINO 兼容好）" value="yolo11m-seg" />
-                  <el-option label="yolo11l-seg · Large — 高精度，~28M 参数" value="yolo11l-seg" />
-                  <el-option label="yolo11x-seg · XLarge — 最精准，~62M 参数" value="yolo11x-seg" />
-                  <el-option label="yolo26n-seg · Nano — ~3M 参数（end2end，NMS-free）" value="yolo26n-seg" />
-                  <el-option label="yolo26s-seg · Small — ~24M 参数（end2end，NMS-free）" value="yolo26s-seg" />
-                  <el-option label="yolo26m-seg · Medium — ~40M 参数（end2end，NMS-free）" value="yolo26m-seg" />
-                  <el-option label="yolo26l-seg · Large — ~63M 参数（end2end，NMS-free）" value="yolo26l-seg" />
-                  <el-option label="yolo26x-seg · XLarge — ~97M 参数（end2end，NMS-free）" value="yolo26x-seg" />
-                </template>
+                <el-option v-for="model in trainingModels" :key="model.value"
+                  :label="model.label" :value="model.value" />
               </el-select>
-              <span class="hint">模型越大精度越高，但速度越慢、显存占用越大</span>
+              <span class="hint">默认 YOLO26 Small；更大模型通常需要更多显存，精度请以验证集为准</span>
             </el-form-item>
             <el-form-item label="Epochs">
               <el-input-number v-model="c.epochs" :min="1" :max="2000" />
@@ -330,11 +301,21 @@ const resumeModelType = ref('best')
 const completedTasks = ref<any[]>([])
 const currentClassCount = ref(0)
 const taskType = ref<'seg'|'det'|'cls'|'obb'>('seg')
+const modelDefaultPolicy = 'yolo26-v1'
+const trainingModels = computed(() => {
+  const suffix = taskType.value === 'det' ? '' : '-' + taskType.value
+  const extension = taskType.value === 'seg' ? '' : '.pt'
+  const sizes = [['n', 'Nano'], ['s', 'Small'], ['m', 'Medium'], ['l', 'Large'], ['x', 'XLarge']]
+  return ['yolo26', 'yolo11'].flatMap(family => sizes.map(([size, label]) => {
+    const value = family + size + suffix + extension
+    return { value, label: value + ' · ' + label + (family === 'yolo26' && size === 's' ? '（默认）' : '') }
+  }))
+})
 
 // ---- 默认参数（按 task_type 分支生成）----
 function getBaseDefaults() {
   return {
-    model_name: 'yolo11s-seg',
+    model_name: 'yolo26s-seg',
     epochs: 200, batch_size: 8, patience: 50, device: '0', workers: 4,
     lr0: 0.01, lrf: 0.01, momentum: 0.937, weight_decay: 0.0005,
     warmup_epochs: 3, warmup_momentum: 0.8,
@@ -356,12 +337,12 @@ function defaultsForTaskType(tt: string): Record<string, any> {
       copy_paste: 0, mixup: 0, degrees: 20, flipud: 0.5, mosaic: 0.3, epochs: 300, patience: 80 })
   } else if (tt === 'cls') {
     // cls 使用项目设置的输入尺寸；几何/混合增强大多关掉（工业纹理依赖方向）
-    Object.assign(d, { model_name: 'yolo11s-cls.pt', use_morphology: false, train_ratio: 0.8,
+    Object.assign(d, { model_name: 'yolo26s-cls.pt', use_morphology: false, train_ratio: 0.8,
       crop_size: 224, degrees: 0, flipud: 0, fliplr: 0.5, translate: 0.05, scale: 0.2, shear: 0,
       mosaic: 0, copy_paste: 0, mixup: 0, erasing: 0, epochs: 100, patience: 30 })
   } else if (tt === 'obb') {
     // OBB 受益于任意旋转
-    Object.assign(d, { model_name: 'yolo11s-obb.pt', use_morphology: false, train_ratio: 0.85,
+    Object.assign(d, { model_name: 'yolo26s-obb.pt', use_morphology: false, train_ratio: 0.85,
       degrees: 180, mosaic: 0.3, copy_paste: 0, mixup: 0 })
   }
   return d
@@ -385,6 +366,8 @@ const recommendedModelType = ref<'best' | 'last'>('best')
 const recommendReason = ref('')
 function recommendModelType(task: any): { type: 'best' | 'last'; reason: string } {
   if (!task) return { type: 'best', reason: '' }
+  if (!task.best_model_path && task.last_model_path) return { type: 'last', reason: '该任务仅有 last.pt，使用最终权重继续训练' }
+  if (!task.last_model_path && task.best_model_path) return { type: 'best', reason: '该任务仅有 best.pt，使用最佳权重继续训练' }
   if (task.status === 'completed') {
     return { type: 'best', reason: '训练已完成，best.pt 是最优收敛权重' }
   }
@@ -422,15 +405,12 @@ function applyResumeTask(taskId: number | null) {
   resumeModelType.value = rec.type
 }
 
-watch(resumeTaskId, (id) => {
-  if (trainMode.value === 'finetune') applyResumeTask(id)
-})
-
-watch(trainMode, (m) => {
+watch([resumeTaskId, trainMode], ([id, m], [, previousMode]) => {
   if (m === 'finetune') {
-    applyResumeTask(resumeTaskId.value)
-  } else {
+    applyResumeTask(id)
+  } else if (m !== previousMode) {
     recommendReason.value = ''
+    c.value.model_name = defaultsForTaskType(taskType.value).model_name
   }
 })
 
@@ -441,8 +421,12 @@ onMounted(async () => {
     taskType.value = (proj.task_type || 'seg') as 'seg' | 'det' | 'cls' | 'obb'
     const defaults = defaultsForTaskType(taskType.value)
     if (proj.last_train_config && Object.keys(proj.last_train_config).length > 0) {
-      // 用户点过"保存为默认"：缓存覆盖在默认之上
-      Object.assign(c.value, defaults, proj.last_train_config)
+      const { _model_default_policy, ...saved } = proj.last_train_config
+      // 旧缓存不能把新内置默认拉回 YOLO11。更新后明确保存的模型选择仍保留。
+      if (_model_default_policy !== modelDefaultPolicy && !String(saved.model_name || '').startsWith('yolo26')) {
+        delete saved.model_name
+      }
+      Object.assign(c.value, defaults, saved)
       ElMessage.info('已加载上次保存的训练参数')
     } else {
       Object.assign(c.value, defaults)
@@ -454,7 +438,11 @@ onMounted(async () => {
     completedTasks.value = (data || []).filter((t: any) =>
       (t.status === 'completed' || t.status === 'cancelled') && (t.best_model_path || t.last_model_path)
     )
-    if (completedTasks.value.length > 0) resumeTaskId.value = completedTasks.value[0].id
+    if (completedTasks.value.length > 0) {
+      // 列表按新到旧返回；已有可继承权重时默认继续最近一次训练。
+      resumeTaskId.value = completedTasks.value[0].id
+      trainMode.value = 'finetune'
+    }
   } catch {}
 })
 
@@ -462,7 +450,7 @@ onMounted(async () => {
 async function saveAsDefault() {
   savingDefaults.value = true
   try {
-    await api.put(`/projects/${props.id}/train-config-cache`, c.value)
+    await api.put(`/projects/${props.id}/train-config-cache`, { ...c.value, _model_default_policy: modelDefaultPolicy })
     ElMessage.success('已保存为该项目默认参数')
   } catch {
     ElMessage.error('保存失败')

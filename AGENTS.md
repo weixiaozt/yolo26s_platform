@@ -48,8 +48,8 @@ uvicorn 没开 `--reload`，必须手动 kill PID + 重启。
 |---|---|---|---|---|
 | `seg` | 实例分割 | YOLO polygon txt | yolo26s-seg.pt | 大图 → resize → 滑窗 crop_size² |
 | `det` | 目标检测 | YOLO bbox txt | yolo26s.pt | 同 seg |
-| `cls` | 图像分类 | ImageFolder `dataset/<class>/` | yolo11s-cls.pt | **不切片**，整图 letterbox 到 imgsz |
-| `obb` | 旋转目标检测 | YOLO 4 角点 txt（8 归一化坐标） | yolo11s-obb.pt | 同 seg |
+| `cls` | 图像分类 | ImageFolder `dataset/<class>/` | yolo26s-cls.pt | **不切片**，整图 letterbox 到 imgsz |
+| `obb` | 旋转目标检测 | YOLO 4 角点 txt（8 归一化坐标） | yolo26s-obb.pt | 同 seg |
 
 cls 标签存 `images.class_id`（图级），其他 task 标签存 `annotations.polygon`（实例级）。
 

@@ -15,8 +15,10 @@
 """
 
 from pathlib import Path
+import shutil
 import sys
 from typing import Optional, Callable
+from core.model_modes import supports_native_head
 
 
 _HEAD_MODES = {"legacy", "native", "compat"}
@@ -31,17 +33,16 @@ def _resolve_head_export_args(
 
     ``legacy`` 保留旧调用方语义：end2end 模型走原生 one-to-one，普通模型
     完全遵循原有 ``nms`` 开关。只有真实 end2end head 且显式请求 ``compat``
-    时，才切换到 one-to-many head；传统 NMS 继续由运行时统一执行，保证
-    PT/OpenVINO 使用相同的 conf/iou 参数和后处理实现。
+    时，才切换到 one-to-many head；传统 NMS 由部署运行时执行。
     """
     if head_mode not in _HEAD_MODES:
         raise ValueError(f"不支持的 head_mode: {head_mode}，可选: legacy / native / compat")
 
     if is_end2end:
         if head_mode == "compat":
-            return "compat", {"end2end": False}
-        # native/legacy 都保持模型默认的 one-to-one NMS-free head。
-        return "native", {}
+            return "compat", {"end2end": False, "nms": False}
+        # 显式选择 one-to-one，避免权重里保存的兼容设置影响默认导出。
+        return "native", {"end2end": True, "nms": False}
 
     # YOLO11 等非 end2end 模型不得注入 end2end 参数，保持既有导出行为。
     if nms:
@@ -113,6 +114,13 @@ def run_export(
 
     assert model_path.exists(), f"模型文件不存在: {model_path}"
 
+    # Ultralytics 将产物写在权重旁边。在独立输出目录导出，避免不同
+    # head/精度的导出互相覆盖，也不修改训练目录里的原始权重和旧产物。
+    export_source = output_dir / model_path.name
+    if export_source.resolve() != model_path.resolve():
+        shutil.copy2(model_path, export_source)
+    model_path = export_source
+
     # ---- 加载模型 ----
     if progress_callback:
         progress_callback(1, 4, "加载模型...")
@@ -121,7 +129,7 @@ def run_export(
     # 以真实 head 属性判断，不能只依赖模型文件名。
     is_end2end = False
     try:
-        is_end2end = bool(getattr(model.model.model[-1], 'end2end', False))
+        is_end2end = supports_native_head(model)
     except Exception:
         pass
     effective_head_mode, head_export_args = _resolve_head_export_args(
@@ -130,7 +138,7 @@ def run_export(
         nms=nms,
     )
     if effective_head_mode == "compat":
-        print("[export] end2end 模型使用兼容/高召回模式：one-to-many + 运行时 NMS")
+        print("[export] end2end 模型使用兼容模式：one-to-many + 运行时 NMS")
     elif is_end2end:
         print("[export] end2end 模型使用原生模式：one-to-one NMS-free")
 
@@ -293,6 +301,7 @@ def run_export(
                 imgsz=imgsz,
                 half=half,
                 simplify=simplify,
+                **(head_export_args if is_end2end else {}),
             )
             results["export_path"] = str(trt_path)
         except Exception as e:

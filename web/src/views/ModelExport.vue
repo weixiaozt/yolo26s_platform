@@ -85,15 +85,15 @@
         </el-alert>
         <el-form-item v-if="isEnd2endModel && exportFormat !== 'tensorrt'" label="YOLO26 模式">
           <el-radio-group v-model="headMode">
-            <el-radio label="compat">兼容/高召回（推荐）</el-radio>
-            <el-radio label="native">原生端到端（速度优先）</el-radio>
+            <el-radio label="native">原生端到端（默认）</el-radio>
+            <el-radio label="compat">兼容模式（传统 NMS）</el-radio>
           </el-radio-group>
           <div style="font-size:12px;color:#909399;line-height:1.6;margin-top:4px">
             <template v-if="headMode === 'compat'">
-              使用 one-to-many head + 运行时标准 NMS，PT/OpenVINO 共用相同 conf/iou 参数。
+              使用 one-to-many 分支，由部署程序执行传统 NMS；与原生模式的检测结果可能不同。
             </template>
             <template v-else>
-              使用 one-to-one NMS-free 输出，部署简单，但小目标召回率可能略低。
+              使用 one-to-one 端到端输出，与平台默认 PyTorch 推理分支一致；多切片拼接后仍会去重。
             </template>
           </div>
         </el-form-item>
@@ -252,7 +252,7 @@ const exportFormat = ref('onnx')
 const imgsz = ref(640)
 const precision = ref('fp32')
 const nms = ref(false)
-const headMode = ref<'native'|'compat'>('compat')
+const headMode = ref<'native'|'compat'>('native')
 const exporting = ref(false)
 let pollTimer: any = null
 
@@ -286,8 +286,7 @@ async function loadTasks() {
   if (data.length > 0 && !selTaskId.value) {
     selTaskId.value = data[0].task_id
     if (data[0].imgsz) imgsz.value = data[0].imgsz
-    const name = (data[0].model_name || '').toLowerCase()
-    headMode.value = name.includes('yolo26') || name.includes('yolo10') ? 'compat' : 'native'
+    headMode.value = 'native'
   }
 }
 
@@ -314,7 +313,7 @@ function onTaskChange() {
   const name = (t?.model_name || '').toLowerCase()
   if (name.includes('yolo26') || name.includes('yolo10')) {
     nms.value = false
-    headMode.value = 'compat'
+    headMode.value = 'native'
   }
 }
 
@@ -324,11 +323,11 @@ const isClsTask = computed(() => {
   return t?.task_type === 'cls'
 })
 
-// 当前选中任务是否 end2end 架构模型（YOLO26/10 head 自带 NMS，"内嵌 NMS" 开关无意义）
+// 分类没有检测框/NMS；YOLO26/10 检测类模型才有可选的双分支。
 const isEnd2endModel = computed(() => {
   const t = tasks.value.find(x => x.task_id === selTaskId.value)
   const name = (t?.model_name || '').toLowerCase()
-  return name.includes('yolo26') || name.includes('yolo10')
+  return !isClsTask.value && (name.includes('yolo26') || name.includes('yolo10'))
 })
 
 function taskStatusType(s: string) {
